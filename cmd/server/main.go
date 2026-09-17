@@ -141,8 +141,8 @@ func serveConnWithTimeout(conn net.Conn, idleTimeout, readTimeout time.Duration)
 // A fatal framing error is not an ordinary malformed-request 400: there is
 // no safely identified request boundary, so the connection can never be
 // reused afterward. As a courtesy, one best-effort 400 is still attempted
-// (matching this project's documented design) before closing - whether or
-// not that write succeeds, the connection is never read from again.
+// before closing - whether or not that write succeeds, the connection is
+// never read from again.
 func drainBufferedRequests(conn net.Conn, framer *reqframe.Framer) bool {
 	for {
 		raw, ok, err := framer.Next()

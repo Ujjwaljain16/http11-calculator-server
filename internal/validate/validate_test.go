@@ -98,7 +98,7 @@ func TestValidate_OK(t *testing.T) {
 
 // Validation must not encode any routing or method decision: an unsupported
 // operation and a disallowed method both validate exactly as a supported
-// GET request would - only Router (Phase 5) decides what to do about the
+// GET request would - only the router decides what to do about the
 // path/method themselves.
 func TestValidate_DoesNotEncodeRoutingOrMethodDecisions(t *testing.T) {
 	unsupportedOp := parseOrFatal(t, "GET /pow?a=2&b=8 HTTP/1.1\r\nHost: x\r\n\r\n")

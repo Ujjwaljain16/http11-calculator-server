@@ -92,7 +92,7 @@ func readExactly(t *testing.T, conn net.Conn, want []byte) {
 	}
 }
 
-// 1. One request, then the connection is still usable for another.
+// One request, then the connection is still usable for another.
 func TestServeConn_SingleRequestThenConnectionStillUsable(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -105,10 +105,10 @@ func TestServeConn_SingleRequestThenConnectionStillUsable(t *testing.T) {
 	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "2"))
 }
 
-// 2 & 5. Multiple sequential requests on the same connection, each written
-// and read in strict order - this is both the "different operations get
+// Multiple sequential requests on the same connection, each written and
+// read in strict order - this doubles as the "different operations get
 // correct responses" proof and the "connection persists across requests"
-// proof the spec asks for; they are the same underlying mechanism.
+// proof; they are the same underlying mechanism.
 func TestServeConn_SequentialRequestsOnSameConnection(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -130,7 +130,7 @@ func TestServeConn_SequentialRequestsOnSameConnection(t *testing.T) {
 	}
 }
 
-// 3. Multiple complete requests sent in a single client write must all be
+// Multiple complete requests sent in a single client write must all be
 // answered without the server needing another client write.
 func TestServeConn_MultipleRequestsBufferedInOneWrite(t *testing.T) {
 	ln := startCalcServer(t)
@@ -144,7 +144,7 @@ func TestServeConn_MultipleRequestsBufferedInOneWrite(t *testing.T) {
 	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "2"))
 }
 
-// 4. A request split across multiple writes must not produce a response
+// A request split across multiple writes must not produce a response
 // until it is actually complete.
 func TestServeConn_PartialRequestAcrossMultipleWrites(t *testing.T) {
 	ln := startCalcServer(t)
@@ -163,7 +163,7 @@ func TestServeConn_PartialRequestAcrossMultipleWrites(t *testing.T) {
 	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "3"))
 }
 
-// 6. A clean client EOF must not crash or hang the handler, and must leave
+// A clean client EOF must not crash or hang the handler, and must leave
 // the server able to accept a fresh connection afterward.
 func TestServeConn_CleanClientEOFDoesNotAffectServer(t *testing.T) {
 	ln := startCalcServer(t)
@@ -179,8 +179,7 @@ func TestServeConn_CleanClientEOFDoesNotAffectServer(t *testing.T) {
 }
 
 // A malformed-but-framed request must produce a Bad Request response, not
-// a crash - the exact malformed-request policy is Phase 8's concern, but
-// the loop must already survive it structurally.
+// a crash, and the connection loop must survive it.
 func TestServeConn_UnparseableRequestGetsBadRequestNotACrash(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -194,10 +193,9 @@ func TestServeConn_UnparseableRequestGetsBadRequestNotACrash(t *testing.T) {
 }
 
 // An incomplete request that never finds a boundary and exceeds
-// reqframe.MaxRequestSize gets a best-effort 400 Bad Request (matching
-// this project's documented plan.md design - unlike an ordinary
-// malformed-but-complete request, this is not recoverable), and the
-// connection then closes. The listener must remain able to accept a
+// reqframe.MaxRequestSize gets a best-effort 400 Bad Request - unlike an
+// ordinary malformed-but-complete request, this is not recoverable - and
+// the connection then closes. The listener must remain able to accept a
 // fresh, independent connection afterward. The 400 response is read and
 // parsed independently from the raw socket bytes (readWireResponse),
 // not manufactured via httpmsg.NewResponse.
@@ -275,12 +273,12 @@ func TestServeConn_IdleTimeoutClosesConnectionBeforeAnyRequestStarts(t *testing.
 	expectClosed(t, conn)
 }
 
-// --- Phase 9: end-to-end acceptance test ---
+// --- End-to-end acceptance test ---
 //
 // wireResponse and readWireResponse deliberately do NOT reuse httpmsg's
 // writer/parser: they exist to independently verify what the server
 // actually put on the real TCP wire, not to re-check the writer's own
-// internal correctness (that's Phase 6's job).
+// internal correctness (httpmsg's own tests already cover that).
 
 type wireResponse struct {
 	version       string
@@ -480,9 +478,9 @@ func TestServer_MethodNotAllowedOverRealConnection(t *testing.T) {
 	assertResponse(t, resp, 405, "Method Not Allowed", "Method Not Allowed")
 }
 
-// --- Phase 10: real TCP fragmentation tests ---
+// --- Real TCP fragmentation tests ---
 //
-// Phase 7's TestServeConn_MultipleRequestsBufferedInOneWrite already proves
+// TestServeConn_MultipleRequestsBufferedInOneWrite (above) already proves
 // "two complete requests in one client Write produce two responses" - not
 // duplicated here.
 
@@ -545,7 +543,7 @@ func TestServer_MultipleRequestsCrossBoundaryFragmentsOverRealTCP(t *testing.T) 
 	assertResponse(t, resp2, 200, "OK", "5")
 }
 
-// --- Phase 12: Connection: close ---
+// --- Connection: close ---
 
 // A client that sends its own Connection: close header gets a response
 // that reflects it (not the usual keep-alive every other test in this

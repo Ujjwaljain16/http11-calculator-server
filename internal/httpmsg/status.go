@@ -12,7 +12,7 @@ const (
 
 // ReasonPhrase is the one source of truth for each status's reason text -
 // used in the status line, and, for non-2xx responses, as the body itself
-// (Part 8: "Short reason string, e.g. Bad Request").
+// (a short reason string, e.g. "Bad Request").
 func (s Status) ReasonPhrase() string {
 	switch s {
 	case StatusOK:

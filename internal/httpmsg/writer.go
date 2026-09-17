@@ -7,9 +7,9 @@ import (
 )
 
 // WriteResponse serializes resp to w: status line, headers, a blank line,
-// then the body - CRLF everywhere, matching Part 4's response grammar
-// exactly. It only serializes what resp already contains; it never opens a
-// socket, and never decides what status or body a request deserves.
+// then the body - CRLF everywhere. It only serializes what resp already
+// contains; it never opens a socket, and never decides what status or body
+// a request deserves.
 func WriteResponse(w io.Writer, resp Response) error {
 	var buf bytes.Buffer
 

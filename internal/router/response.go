@@ -6,8 +6,8 @@ import (
 	"calcserver/internal/httpmsg"
 )
 
-// statusFor is the one place an Outcome becomes an HTTP status - Phase 5's
-// outcomes stay domain-level everywhere else.
+// statusFor is the one place an Outcome becomes an HTTP status - Outcome
+// stays domain-level everywhere else in this package.
 var statusFor = map[Outcome]httpmsg.Status{
 	OutcomeOK:               httpmsg.StatusOK,
 	OutcomeNotFound:         httpmsg.StatusNotFound,
@@ -23,8 +23,7 @@ var statusFor = map[Outcome]httpmsg.Status{
 // request carried a Connection: close header) - Respond does not decide
 // that itself, only reflects it in the emitted Connection header. A
 // successful calculation's body is its numeric result; every other
-// outcome's body is simply its status's reason phrase (Part 8's
-// documented short-reason-string bodies).
+// outcome's body is simply its status's reason phrase.
 func Respond(d Decision, version string, close bool) httpmsg.Response {
 	status := statusFor[d.Outcome]
 

@@ -11,18 +11,17 @@ import (
 // check for it with errors.Is; the wrapped message gives the specific
 // reason. Parsing never reports on application-level concerns (unknown
 // operation, invalid number, missing Host, ...) - only on request syntax
-// that this subset's grammar (plan.md Part 4) cannot represent at all.
+// this subset's grammar cannot represent at all.
 var ErrMalformedRequest = errors.New("malformed request")
 
 // ParseRequest turns one framed request block - the exact bytes returned by
 // reqframe.Framer.Next(), i.e. ending in "\r\n\r\n" - into a Request.
 //
-// Documented parsing decisions (see assignment/plan.md Part 4 for the
-// grammar these implement):
+// Documented parsing decisions:
 //
 //   - Duplicate headers: every occurrence is kept, in order (Headers is a
-//     slice, not a map). Whether a duplicate is acceptable is a later
-//     phase's decision.
+//     slice, not a map). Whether a duplicate is acceptable is validation's
+//     decision, not parsing's.
 //   - Duplicate query parameters: every value is kept, in order
 //     (Query is net/url.Values, i.e. map[string][]string).
 //   - Empty query values ("a=") and bare parameter names without '='
@@ -38,9 +37,9 @@ var ErrMalformedRequest = errors.New("malformed request")
 //     separated by a single space (METHOD, TARGET, VERSION); any other
 //     count of fields is malformed. The method is not restricted to known
 //     verbs here - an unsupported method (e.g. POST) still parses; only
-//     routing (a later phase) rejects it.
-//   - The request-target must be in origin-form, starting with '/' (per
-//     Part 4: no absolute-URI, "*", or authority form is supported).
+//     routing rejects it.
+//   - The request-target must be in origin-form, starting with '/' - no
+//     absolute-URI, "*", or authority form is supported.
 //   - Malformed header lines: a header line must contain a colon, with a
 //     non-empty name and no whitespace between the name and the colon
 //     (whitespace there is a known request-smuggling ambiguity, so it is

@@ -22,7 +22,7 @@ func next(t *testing.T, f *reqframe.Framer) ([]byte, bool) {
 	return got, ok
 }
 
-// 1. Terminator arrives in a single Feed.
+// Terminator arrives in a single Feed.
 func TestNext_TerminatorInOneFeed(t *testing.T) {
 	f := reqframe.NewFramer()
 	req := []byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -40,7 +40,7 @@ func TestNext_TerminatorInOneFeed(t *testing.T) {
 	}
 }
 
-// 2. Boundary split across reads, at every interior position of the
+// Boundary split across reads, at every interior position of the
 // 4-byte terminator.
 func TestNext_BoundarySplitAcrossFeeds(t *testing.T) {
 	full := []byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -66,8 +66,8 @@ func TestNext_BoundarySplitAcrossFeeds(t *testing.T) {
 	}
 }
 
-// 2b. The exact fragment sequence given in the spec: "\r", "\n\r", "\n",
-// fed as three separate pieces of the same terminator.
+// A terminator fed as three separate one-to-two-byte pieces: "\r", "\n\r",
+// "\n".
 func TestNext_BoundarySplitExactExamplesFromSpec(t *testing.T) {
 	prefix := []byte("GET / HTTP/1.1\r\nHost: x")
 	fragments := [][]byte{[]byte("\r"), []byte("\n\r"), []byte("\n")}
@@ -91,7 +91,7 @@ func TestNext_BoundarySplitExactExamplesFromSpec(t *testing.T) {
 	}
 }
 
-// 3. Partial headers, then completion.
+// Partial headers, then completion.
 func TestNext_PartialHeadersThenCompletion(t *testing.T) {
 	f := reqframe.NewFramer()
 	f.Feed([]byte("GET /add?a=1&b"))
@@ -110,7 +110,7 @@ func TestNext_PartialHeadersThenCompletion(t *testing.T) {
 	}
 }
 
-// 4. Multiple complete requests arriving in one Feed.
+// Multiple complete requests arriving in one Feed.
 func TestNext_MultipleRequestsInOneFeed(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
 	req2 := []byte("GET /sub?a=5&b=3 HTTP/1.1\r\nHost: y\r\n\r\n")
@@ -131,7 +131,7 @@ func TestNext_MultipleRequestsInOneFeed(t *testing.T) {
 	}
 }
 
-// 5. Multiple complete requests plus a partial third.
+// Multiple complete requests plus a partial third.
 func TestNext_MultipleRequestsPlusPartialThird(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
 	req2 := []byte("GET /sub?a=5&b=3 HTTP/1.1\r\nHost: y\r\n\r\n")
@@ -161,7 +161,7 @@ func TestNext_MultipleRequestsPlusPartialThird(t *testing.T) {
 	}
 }
 
-// 6. The tail of request 1's terminator and the start of request 2 arrive
+// The tail of request 1's terminator and the start of request 2 arrive
 // in the same Feed call.
 func TestNext_BoundarySplitWithFollowingRequest(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -186,7 +186,7 @@ func TestNext_BoundarySplitWithFollowingRequest(t *testing.T) {
 	}
 }
 
-// 7. Empty and very small inputs.
+// Empty and very small inputs.
 func TestNext_EmptyAndTinyInputs(t *testing.T) {
 	t.Run("zero_bytes", func(t *testing.T) {
 		f := reqframe.NewFramer()
@@ -217,7 +217,7 @@ func TestNext_EmptyAndTinyInputs(t *testing.T) {
 	})
 }
 
-// 8. Byte preservation: arbitrary (including non-ASCII) bytes must survive
+// Byte preservation: arbitrary (including non-ASCII) bytes must survive
 // extraction unchanged.
 func TestNext_BytePreservationWithArbitraryBytes(t *testing.T) {
 	body := []byte{0x00, 0xFF, 0x10, 'a', 'b', 0x7F, 0x80}
@@ -234,7 +234,7 @@ func TestNext_BytePreservationWithArbitraryBytes(t *testing.T) {
 	}
 }
 
-// 9. When multiple terminators are present, extraction stops at the first.
+// When multiple terminators are present, extraction stops at the first.
 func TestNext_StopsAtFirstTerminatorWhenMultiplePresent(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
 	trailingLookalike := []byte("\r\n\r\nmore-bytes-that-look-like-another-terminator\r\n\r\n")
@@ -251,7 +251,7 @@ func TestNext_StopsAtFirstTerminatorWhenMultiplePresent(t *testing.T) {
 	}
 }
 
-// 10. A second request already sitting in the buffer must be retrievable
+// A second request already sitting in the buffer must be retrievable
 // without any further Feed call - the core persistent-buffer requirement.
 func TestNext_BufferedSecondRequestNeedsNoFurtherFeed(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -332,7 +332,7 @@ func TestNext_FragmentationIsOrderIndependent(t *testing.T) {
 	}
 }
 
-// --- Phase 8: request size limit ---
+// --- Request size limit ---
 
 // An incomplete request that grows past MaxRequestSize without ever
 // producing a boundary must report ErrRequestTooLarge, not hang forever
@@ -397,7 +397,7 @@ func TestNext_LargeButUnderLimitStillCompletes(t *testing.T) {
 	}
 }
 
-// --- Phase 10: TCP fragmentation / request-boundary tests ---
+// --- TCP fragmentation / request-boundary tests ---
 //
 // Split-\r\n\r\n coverage (every interior position of the 4-byte
 // terminator: "\r|\n\r\n", "\r\n|\r\n", "\r\n\r|\n") is already exhaustively

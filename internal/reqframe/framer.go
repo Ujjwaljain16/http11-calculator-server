@@ -14,8 +14,7 @@ const terminator = "\r\n\r\n"
 // MaxRequestSize bounds how many bytes a Framer will accumulate while
 // looking for a request boundary that hasn't arrived yet. This subset's
 // requests are a one-line GET plus a Host header and maybe one or two
-// extras - well under 200 bytes in practice. 8 KiB (the size already named
-// as an example in this project's engineering spec) gives roughly 40x
+// extras - well under 200 bytes in practice. 8 KiB gives roughly 40x
 // headroom over any realistic legitimate request while still bounding how
 // much memory an untrusted peer can make a connection hold onto by simply
 // never finishing a header block.

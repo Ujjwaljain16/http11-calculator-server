@@ -2,7 +2,7 @@
 // in-memory routing Decision: known-path/GET/valid-params requests get
 // computed by calc; everything else gets one of the three failure
 // outcomes. Router never produces HTTP status lines or response bytes -
-// that translation is Phase 6's job.
+// that translation happens in response.go.
 package router
 
 import (

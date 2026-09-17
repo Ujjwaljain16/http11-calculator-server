@@ -7,7 +7,7 @@ import (
 	"calcserver/internal/httpmsg"
 )
 
-// 1. Valid request line parsing.
+// Valid request line parsing.
 func TestParseRequest_ValidRequestLine(t *testing.T) {
 	req, err := httpmsg.ParseRequest([]byte("GET /add?a=2&b=3 HTTP/1.1\r\nHost: localhost\r\n\r\n"))
 	if err != nil {
@@ -24,7 +24,7 @@ func TestParseRequest_ValidRequestLine(t *testing.T) {
 	}
 }
 
-// 2. Valid headers.
+// Valid headers.
 func TestParseRequest_ValidHeaders(t *testing.T) {
 	req, err := httpmsg.ParseRequest([]byte(
 		"GET /add?a=2&b=3 HTTP/1.1\r\nHost: localhost\r\nX-Custom: some value\r\nX-Empty:\r\n\r\n"))
@@ -45,7 +45,7 @@ func TestParseRequest_ValidHeaders(t *testing.T) {
 	}
 }
 
-// 3. Host extraction/presence representation - both when present and when
+// Host extraction/presence representation - both when present and when
 // absent. The parser never rejects a missing Host; it just reports it.
 func TestParseRequest_HostPresenceRepresentation(t *testing.T) {
 	withHost, err := httpmsg.ParseRequest([]byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: example\r\n\r\n"))
@@ -65,7 +65,7 @@ func TestParseRequest_HostPresenceRepresentation(t *testing.T) {
 	}
 }
 
-// 4. Path extraction.
+// Path extraction.
 func TestParseRequest_PathExtraction(t *testing.T) {
 	cases := []struct {
 		target   string
@@ -87,7 +87,7 @@ func TestParseRequest_PathExtraction(t *testing.T) {
 	}
 }
 
-// 5 & 6. Query parameter extraction, including multiple parameters.
+// Query parameter extraction, including multiple parameters.
 func TestParseRequest_QueryParameterExtraction(t *testing.T) {
 	req, err := httpmsg.ParseRequest([]byte("GET /add?a=2&b=3&op=noop HTTP/1.1\r\nHost: x\r\n\r\n"))
 	if err != nil {
@@ -107,7 +107,7 @@ func TestParseRequest_QueryParameterExtraction(t *testing.T) {
 	}
 }
 
-// 7. Empty and missing query values.
+// Empty and missing query values.
 func TestParseRequest_EmptyAndMissingQueryValues(t *testing.T) {
 	req, err := httpmsg.ParseRequest([]byte("GET /add?a=&b&c=3 HTTP/1.1\r\nHost: x\r\n\r\n"))
 	if err != nil {
@@ -138,7 +138,7 @@ func TestParseRequest_EmptyAndMissingQueryValues(t *testing.T) {
 	}
 }
 
-// 8. Duplicate query parameters keep every value, in order.
+// Duplicate query parameters keep every value, in order.
 func TestParseRequest_DuplicateQueryParameters(t *testing.T) {
 	req, err := httpmsg.ParseRequest([]byte("GET /add?a=1&a=2&a=3 HTTP/1.1\r\nHost: x\r\n\r\n"))
 	if err != nil {
@@ -160,7 +160,7 @@ func TestParseRequest_DuplicateQueryParameters(t *testing.T) {
 	}
 }
 
-// 9. Duplicate headers keep every occurrence, in order.
+// Duplicate headers keep every occurrence, in order.
 func TestParseRequest_DuplicateHeaders(t *testing.T) {
 	req, err := httpmsg.ParseRequest([]byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: first\r\nHost: second\r\n\r\n"))
 	if err != nil {
@@ -175,7 +175,7 @@ func TestParseRequest_DuplicateHeaders(t *testing.T) {
 	}
 }
 
-// 10. Malformed request lines.
+// Malformed request lines.
 func TestParseRequest_MalformedRequestLines(t *testing.T) {
 	cases := map[string]string{
 		"missing_version":      "GET /add?a=1&b=2\r\nHost: x\r\n\r\n",
@@ -197,7 +197,7 @@ func TestParseRequest_MalformedRequestLines(t *testing.T) {
 	}
 }
 
-// 11. Malformed headers.
+// Malformed headers.
 func TestParseRequest_MalformedHeaders(t *testing.T) {
 	cases := map[string]string{
 		"missing_colon":           "GET /add HTTP/1.1\r\nHost example\r\n\r\n",
@@ -215,7 +215,7 @@ func TestParseRequest_MalformedHeaders(t *testing.T) {
 	}
 }
 
-// 12. CRLF handling: a bare '\n' left over after splitting on "\r\n" (i.e.
+// CRLF handling: a bare '\n' left over after splitting on "\r\n" (i.e.
 // a line ending that was not a full CRLF pair) is malformed, not tolerated.
 func TestParseRequest_BareLineFeedIsMalformed(t *testing.T) {
 	// "GET /add HTTP/1.1\nHost: x" has no "\r\n" between the request line
@@ -228,7 +228,7 @@ func TestParseRequest_BareLineFeedIsMalformed(t *testing.T) {
 	}
 }
 
-// 13. Header termination behavior: the block must end with a full blank
+// Header termination behavior: the block must end with a full blank
 // line ("\r\n\r\n"); anything else is rejected defensively even though
 // reqframe.Framer never hands ParseRequest such input in practice.
 func TestParseRequest_RequiresTerminatingBlankLine(t *testing.T) {
@@ -246,7 +246,7 @@ func TestParseRequest_RequiresTerminatingBlankLine(t *testing.T) {
 	}
 }
 
-// 14. HTTP version handling.
+// HTTP version handling.
 func TestParseRequest_HTTPVersionHandling(t *testing.T) {
 	valid := []string{"HTTP/1.0", "HTTP/1.1", "HTTP/2.0"}
 	for _, v := range valid {
@@ -272,7 +272,7 @@ func TestParseRequest_HTTPVersionHandling(t *testing.T) {
 	}
 }
 
-// 15. Representative requests from the assignment itself.
+// Representative requests from the assignment itself.
 func TestParseRequest_RepresentativeAssignmentRequests(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -342,8 +342,8 @@ func TestParseRequest_PercentEncodingDecisions(t *testing.T) {
 	}
 }
 
-// Unsupported operations (routing concern) and invalid numeric values
-// (validation concern) must both still parse successfully at this phase.
+// Unsupported operations (routing's concern) and invalid numeric values
+// (validation's concern) must both still parse successfully.
 func TestParseRequest_DoesNotRejectRoutingOrValidationConcerns(t *testing.T) {
 	unsupportedOp, err := httpmsg.ParseRequest([]byte("GET /pow?a=2&b=8 HTTP/1.1\r\nHost: x\r\n\r\n"))
 	if err != nil {

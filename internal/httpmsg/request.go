@@ -12,7 +12,7 @@ import (
 // the client sent, decoded only where the request-target syntax itself
 // requires it (percent-encoding). Nothing here has been validated against
 // application rules (Host presence, numeric parameters, known
-// operations, ...) - that is later phases' responsibility.
+// operations, ...) - that is validate and router's responsibility.
 type Request struct {
 	Method string
 	// Target is the request-target exactly as it appeared on the wire,
