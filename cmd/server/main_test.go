@@ -6,12 +6,13 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"calcserver/internal/httpmsg"
 )
 
-// startEchoListener starts a real TCP listener on an ephemeral port and runs
-// the same accept-loop/handleConn logic main() uses, so the test exercises
-// the actual Phase 1 server behavior over a real socket.
-func startEchoListener(t *testing.T) net.Listener {
+// startCalcServer runs the same accept-loop/serveConn logic main() uses,
+// on a real ephemeral TCP port, so tests exercise the actual orchestration.
+func startCalcServer(t *testing.T) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -25,126 +26,146 @@ func startEchoListener(t *testing.T) net.Listener {
 			if err != nil {
 				return
 			}
-			go handleConn(conn)
+			go serveConn(conn)
 		}
 	}()
 
 	return ln
 }
 
-func TestEchoServer_ByteForByteOverMultipleWrites(t *testing.T) {
-	ln := startEchoListener(t)
-
+func dial(t *testing.T, ln net.Listener) net.Conn {
+	t.Helper()
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
-
-	messages := [][]byte{
-		[]byte("hello"),
-		[]byte("second write"),
-		[]byte("third write with more bytes 1234567890"),
-	}
-
-	for i, msg := range messages {
-		if _, err := conn.Write(msg); err != nil {
-			t.Fatalf("write %d: %v", i, err)
-		}
-
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		got := make([]byte, len(msg))
-		if _, err := io.ReadFull(conn, got); err != nil {
-			t.Fatalf("read %d: %v", i, err)
-		}
-		if !bytes.Equal(got, msg) {
-			t.Fatalf("echo mismatch on write %d: got %q, want %q", i, got, msg)
-		}
-	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
 }
 
-func TestEchoServer_ConcurrentConnectionsAreIndependent(t *testing.T) {
-	ln := startEchoListener(t)
-
-	dial := func() net.Conn {
-		conn, err := net.Dial("tcp", ln.Addr().String())
-		if err != nil {
-			t.Fatalf("dial: %v", err)
-		}
-		return conn
+// expectedBytes builds the exact wire bytes httpmsg itself would produce
+// for status/body, so these orchestration tests compare against the real
+// response contract without re-deriving CRLF/Content-Length rules by hand.
+func expectedBytes(t *testing.T, status httpmsg.Status, body string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := httpmsg.WriteResponse(&buf, httpmsg.NewResponse("HTTP/1.1", status, body)); err != nil {
+		t.Fatalf("building expected response: %v", err)
 	}
-
-	connA := dial()
-	defer connA.Close()
-	connB := dial()
-	defer connB.Close()
-
-	msgA := []byte("from-a")
-	msgB := []byte("from-b-longer-message")
-
-	if _, err := connA.Write(msgA); err != nil {
-		t.Fatalf("write a: %v", err)
-	}
-	if _, err := connB.Write(msgB); err != nil {
-		t.Fatalf("write b: %v", err)
-	}
-
-	connA.SetReadDeadline(time.Now().Add(2 * time.Second))
-	gotA := make([]byte, len(msgA))
-	if _, err := io.ReadFull(connA, gotA); err != nil {
-		t.Fatalf("read a: %v", err)
-	}
-
-	connB.SetReadDeadline(time.Now().Add(2 * time.Second))
-	gotB := make([]byte, len(msgB))
-	if _, err := io.ReadFull(connB, gotB); err != nil {
-		t.Fatalf("read b: %v", err)
-	}
-
-	if !bytes.Equal(gotA, msgA) {
-		t.Fatalf("connection A echo mismatch: got %q, want %q", gotA, msgA)
-	}
-	if !bytes.Equal(gotB, msgB) {
-		t.Fatalf("connection B echo mismatch: got %q, want %q", gotB, msgB)
-	}
+	return buf.Bytes()
 }
 
-func TestEchoServer_ClientCloseIsClean(t *testing.T) {
-	ln := startEchoListener(t)
-
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-
-	if _, err := conn.Write([]byte("ping")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	got := make([]byte, len("ping"))
+// readExactly reads exactly len(want) bytes (a bounded deadline guards
+// against a hang if the server sends the wrong amount) and compares them.
+func readExactly(t *testing.T, conn net.Conn, want []byte) {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	got := make([]byte, len(want))
 	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("reading response: %v (want %q)", err, want)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("response mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// 1. One request, then the connection is still usable for another.
+func TestServeConn_SingleRequestThenConnectionStillUsable(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	conn.Write([]byte("GET /add?a=2&b=3 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "5"))
+
+	// The same socket must still work for another request afterward.
+	conn.Write([]byte("GET /add?a=1&b=1 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "2"))
+}
+
+// 2 & 5. Multiple sequential requests on the same connection, each written
+// and read in strict order - this is both the "different operations get
+// correct responses" proof and the "connection persists across requests"
+// proof the spec asks for; they are the same underlying mechanism.
+func TestServeConn_SequentialRequestsOnSameConnection(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	steps := []struct {
+		request string
+		status  httpmsg.Status
+		body    string
+	}{
+		{"GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n", httpmsg.StatusOK, "3"},
+		{"GET /sub?a=10&b=4 HTTP/1.1\r\nHost: x\r\n\r\n", httpmsg.StatusOK, "6"},
+		{"GET /mul?a=6&b=7 HTTP/1.1\r\nHost: x\r\n\r\n", httpmsg.StatusOK, "42"},
+		{"GET /div?a=9&b=3 HTTP/1.1\r\nHost: x\r\n\r\n", httpmsg.StatusOK, "3"},
 	}
 
-	// Closing the client side must not hang or panic the server; the listener
-	// must still accept a fresh connection afterward.
-	conn.Close()
+	for _, s := range steps {
+		conn.Write([]byte(s.request))
+		readExactly(t, conn, expectedBytes(t, s.status, s.body))
+	}
+}
 
-	conn2, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial after prior client close: %v", err)
-	}
-	defer conn2.Close()
+// 3. Multiple complete requests sent in a single client write must all be
+// answered without the server needing another client write.
+func TestServeConn_MultipleRequestsBufferedInOneWrite(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
 
-	if _, err := conn2.Write([]byte("still alive")); err != nil {
-		t.Fatalf("write on second connection: %v", err)
+	req1 := "GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n"
+	req2 := "GET /sub?a=5&b=3 HTTP/1.1\r\nHost: x\r\n\r\n"
+	conn.Write([]byte(req1 + req2))
+
+	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "3"))
+	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "2"))
+}
+
+// 4. A request split across multiple writes must not produce a response
+// until it is actually complete.
+func TestServeConn_PartialRequestAcrossMultipleWrites(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	conn.Write([]byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: loc"))
+
+	// Nothing should arrive yet - a short deadline must expire.
+	conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatalf("expected no response before the request was completed")
 	}
-	conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
-	got2 := make([]byte, len("still alive"))
-	if _, err := io.ReadFull(conn2, got2); err != nil {
-		t.Fatalf("read on second connection: %v", err)
-	}
-	if string(got2) != "still alive" {
-		t.Fatalf("echo mismatch: got %q, want %q", got2, "still alive")
-	}
+
+	conn.Write([]byte("alhost\r\n\r\n"))
+	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "3"))
+}
+
+// 6. A clean client EOF must not crash or hang the handler, and must leave
+// the server able to accept a fresh connection afterward.
+func TestServeConn_CleanClientEOFDoesNotAffectServer(t *testing.T) {
+	ln := startCalcServer(t)
+
+	first := dial(t, ln)
+	first.Write([]byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	readExactly(t, first, expectedBytes(t, httpmsg.StatusOK, "3"))
+	first.Close()
+
+	second := dial(t, ln)
+	second.Write([]byte("GET /add?a=4&b=5 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	readExactly(t, second, expectedBytes(t, httpmsg.StatusOK, "9"))
+}
+
+// A malformed-but-framed request must produce a Bad Request response, not
+// a crash - the exact malformed-request policy is Phase 8's concern, but
+// the loop must already survive it structurally.
+func TestServeConn_UnparseableRequestGetsBadRequestNotACrash(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	conn.Write([]byte("NOT A REQUEST LINE\r\nHost: x\r\n\r\n"))
+	readExactly(t, conn, expectedBytes(t, httpmsg.StatusBadRequest, httpmsg.StatusBadRequest.ReasonPhrase()))
+
+	// The connection must still be usable afterward.
+	conn.Write([]byte("GET /add?a=1&b=1 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "2"))
 }
