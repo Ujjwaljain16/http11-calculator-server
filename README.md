@@ -24,6 +24,8 @@ go run ./cmd/server -addr :8080
 
 `-addr` accepts any `host:port` value that `net.Listen("tcp", ...)` accepts.
 
+Press Ctrl+C (or send `SIGTERM`) to stop the server: it stops accepting new connections and exits. Connections already in progress are not forcibly drained — each simply runs to completion (or ends) on its own.
+
 ## Testing
 
 ```

@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"calcserver/internal/httpmsg"
@@ -44,6 +47,18 @@ func main() {
 	defer ln.Close()
 
 	fmt.Printf("listening on %s\n", ln.Addr())
+
+	// On SIGINT/SIGTERM, close the listener so Accept() returns
+	// net.ErrClosed and the loop below exits on its own - the same clean
+	// shutdown path already used whenever a test closes its listener.
+	// In-flight connections are not drained; each is left to finish (or
+	// end) on its own goroutine when the process exits.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		ln.Close()
+	}()
 
 	for {
 		conn, err := ln.Accept()
