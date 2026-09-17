@@ -507,3 +507,26 @@ func TestFramer_MultipleRequestsAcrossArbitraryFragments(t *testing.T) {
 		}
 	}
 }
+
+// Pending reports 0 on a fresh Framer, grows as unterminated bytes are
+// fed, and drops back to 0 once a complete request is fully extracted
+// with nothing left over.
+func TestFramer_Pending(t *testing.T) {
+	f := reqframe.NewFramer()
+	if got := f.Pending(); got != 0 {
+		t.Fatalf("Pending() on a fresh Framer = %d, want 0", got)
+	}
+
+	f.Feed([]byte("GET /add?a=1"))
+	if got := f.Pending(); got != len("GET /add?a=1") {
+		t.Fatalf("Pending() after partial feed = %d, want %d", got, len("GET /add?a=1"))
+	}
+
+	f.Feed([]byte("&b=2 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	if _, ok := next(t, f); !ok {
+		t.Fatalf("expected a complete request")
+	}
+	if got := f.Pending(); got != 0 {
+		t.Fatalf("Pending() after full extraction = %d, want 0", got)
+	}
+}

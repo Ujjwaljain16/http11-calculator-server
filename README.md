@@ -70,7 +70,7 @@ There is no request-body support — every input is a query parameter on the req
 - A request's headers end at the first `\r\n\r\n` — that's the request boundary. This subset has no request bodies, so the header block *is* the whole request.
 - A `Host` header must be present (its value is not otherwise validated).
 - Every response carries `Content-Length`, computed from the response body's actual byte count.
-- Every response carries `Connection: keep-alive`.
+- Every response carries `Connection: keep-alive` by default. If a request itself sends `Connection: close`, the response reflects that instead and the server closes the connection after sending it — the connection stays open by default and only closes when asked.
 - Multiple requests can be sent over one TCP connection, one after another (or even buffered ahead of their responses) — the connection is not closed after a single request.
 - TCP `Read` boundaries are never treated as request boundaries: one `Read` may deliver part of a request, all of it, or several requests at once, and the server handles all three cases identically.
 
@@ -90,8 +90,9 @@ There is no `500` — every internal/socket-level failure is a connection-level 
 - Each TCP connection owns exactly one persistent request framer for its whole lifetime.
 - Multiple requests already sitting in the framer's buffer are all processed before the server reads more bytes from the socket.
 - A request split across multiple reads is retained until it's complete — nothing is discarded or misinterpreted.
-- An **incomplete** request is capped at 8 KiB of accumulated bytes; if no request boundary is found by then, the server makes a best-effort attempt to send `400 Bad Request` and then closes the connection. This differs from an ordinary malformed-but-complete request (which gets `400` and stays open): once no boundary can be found, the server can no longer trust where that request ends, so the connection cannot safely be reused.
-- A connection that goes idle mid-request (or between requests) without sending anything for 5 seconds is closed. This timer is reset before every read, so it never interrupts an active exchange of requests.
+- An **incomplete** request is capped at 8 KiB of accumulated bytes; if no request boundary is found by then, the server makes a best-effort attempt to send `400 Bad Request` (with `Connection: close`, honestly) and then closes the connection. This differs from an ordinary malformed-but-complete request (which gets `400` and stays open): once no boundary can be found, the server can no longer trust where that request ends, so the connection cannot safely be reused.
+- Two separate timeouts bound how long a connection can go quiet, both reset before every read so an active exchange of requests never trips either: a 60-second **idle timeout** applies while waiting for a brand-new request to even start (the connection has nothing buffered), and a shorter 5-second **read timeout** applies once a request has already started arriving but stalls partway through.
+- A client can end a connection on its own terms by sending `Connection: close` on a request; the server answers that request normally, marks the response `Connection: close`, and then closes — it does not wait for another request on that connection.
 - A read error, a write error, or the client closing its side of the connection all close only that one connection — the server keeps accepting other clients.
 
 ## Architecture
@@ -131,8 +132,7 @@ Intentionally not implemented, to keep this a small, explainable educational ser
 - `net/http` or any HTTP framework
 - request bodies
 - chunked transfer encoding
-- `Connection: close` response mode
-- HTTP pipelining as a distinct feature
+- HTTP pipelining as a distinct feature (multiple buffered requests are handled, as noted above, but there is no dedicated pipelining machinery)
 - HTTP/2
 - TLS
 - authentication

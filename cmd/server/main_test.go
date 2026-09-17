@@ -16,13 +16,13 @@ import (
 // startCalcServer runs the same accept-loop/serveConn logic main() uses,
 // on a real ephemeral TCP port, so tests exercise the actual orchestration.
 func startCalcServer(t *testing.T) net.Listener {
-	return startCalcServerWithTimeout(t, defaultReadTimeout)
+	return startCalcServerWithTimeouts(t, defaultIdleTimeout, defaultReadTimeout)
 }
 
-// startCalcServerWithTimeout is startCalcServer with an injectable read
-// timeout, so timeout behavior can be tested in milliseconds instead of
-// waiting on defaultReadTimeout.
-func startCalcServerWithTimeout(t *testing.T, readTimeout time.Duration) net.Listener {
+// startCalcServerWithTimeouts is startCalcServer with injectable idle/read
+// timeouts, so timeout behavior can be tested in milliseconds instead of
+// waiting on the production defaults.
+func startCalcServerWithTimeouts(t *testing.T, idleTimeout, readTimeout time.Duration) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -36,7 +36,7 @@ func startCalcServerWithTimeout(t *testing.T, readTimeout time.Duration) net.Lis
 			if err != nil {
 				return
 			}
-			go serveConnWithTimeout(conn, readTimeout)
+			go serveConnWithTimeout(conn, idleTimeout, readTimeout)
 		}
 	}()
 
@@ -209,7 +209,20 @@ func TestServeConn_OversizedIncompleteRequestGetsBadRequestThenCloses(t *testing
 	conn.Write(oversized)
 
 	resp := readWireResponse(t, conn)
-	assertResponse(t, resp, 400, "Bad Request", "Bad Request")
+	if resp.code != 400 || resp.reason != "Bad Request" {
+		t.Fatalf("status = %d %q, want 400 Bad Request", resp.code, resp.reason)
+	}
+	if string(resp.body) != "Bad Request" {
+		t.Fatalf("body = %q, want %q", resp.body, "Bad Request")
+	}
+	if len(resp.body) != resp.contentLength {
+		t.Fatalf("len(body) = %d, Content-Length = %d", len(resp.body), resp.contentLength)
+	}
+	// Unlike an ordinary malformed-but-complete request, this connection
+	// cannot be reused - the response honestly says so.
+	if got := resp.headers["Connection"]; got != "close" {
+		t.Fatalf("Connection = %q, want close", got)
+	}
 
 	expectClosed(t, conn)
 
@@ -238,12 +251,27 @@ func TestServeConn_IncompleteRequestThenEOFTerminatesCleanly(t *testing.T) {
 // A connection that sends an incomplete request and then stops entirely
 // (no EOF, no more bytes) must eventually be closed by the server's read
 // timeout, not held open forever.
-func TestServeConn_ReadTimeoutClosesIdleConnection(t *testing.T) {
+// A request that starts arriving and then stalls must be closed by the
+// (short) read timeout - the idle timeout is set deliberately huge here so
+// only the read timeout could be what closes it.
+func TestServeConn_ReadTimeoutClosesConnectionMidRequest(t *testing.T) {
 	const testReadTimeout = 100 * time.Millisecond
-	ln := startCalcServerWithTimeout(t, testReadTimeout)
+	ln := startCalcServerWithTimeouts(t, time.Hour, testReadTimeout)
 	conn := dial(t, ln)
 
 	conn.Write([]byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x"))
+	expectClosed(t, conn)
+}
+
+// A connection that sends nothing at all - no request has started, so
+// framer.Pending() is 0 - must be closed by the idle timeout instead, on
+// its own separate, shorter deadline. The read timeout is set deliberately
+// huge here so only the idle timeout could be what closes it.
+func TestServeConn_IdleTimeoutClosesConnectionBeforeAnyRequestStarts(t *testing.T) {
+	const testIdleTimeout = 100 * time.Millisecond
+	ln := startCalcServerWithTimeouts(t, testIdleTimeout, time.Hour)
+	conn := dial(t, ln)
+
 	expectClosed(t, conn)
 }
 
@@ -515,4 +543,48 @@ func TestServer_MultipleRequestsCrossBoundaryFragmentsOverRealTCP(t *testing.T) 
 
 	resp2 := readWireResponse(t, conn)
 	assertResponse(t, resp2, 200, "OK", "5")
+}
+
+// --- Phase 12: Connection: close ---
+
+// A client that sends its own Connection: close header gets a response
+// that reflects it (not the usual keep-alive every other test in this
+// file expects), and the server then closes the connection instead of
+// waiting for another request.
+func TestServer_ClientRequestedCloseIsHonored(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	writeRequest(t, conn, "GET /add?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+
+	resp := readWireResponse(t, conn)
+	if resp.code != 200 || resp.reason != "OK" {
+		t.Fatalf("status = %d %q, want 200 OK", resp.code, resp.reason)
+	}
+	if string(resp.body) != "15" {
+		t.Fatalf("body = %q, want 15", resp.body)
+	}
+	if len(resp.body) != resp.contentLength {
+		t.Fatalf("len(body) = %d, Content-Length = %d", len(resp.body), resp.contentLength)
+	}
+	if got := resp.headers["Connection"]; got != "close" {
+		t.Fatalf("Connection = %q, want close", got)
+	}
+
+	expectClosed(t, conn)
+}
+
+// Without a Connection: close request header, the connection must stay
+// open exactly as before - this feature must not change default behavior.
+func TestServer_NoConnectionCloseHeaderStaysOpen(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	writeRequest(t, conn, "GET /add?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp := readWireResponse(t, conn)
+	assertResponse(t, resp, 200, "OK", "15")
+
+	writeRequest(t, conn, "GET /add?a=1&b=1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp2 := readWireResponse(t, conn)
+	assertResponse(t, resp2, 200, "OK", "2")
 }

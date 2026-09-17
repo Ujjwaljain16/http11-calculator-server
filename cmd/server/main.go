@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,11 +31,21 @@ const fallbackVersion = "HTTP/1.1"
 // request bytes, not a single read's size.
 const readChunkSize = 4096
 
-// defaultReadTimeout bounds how long a connection can sit idle waiting for
-// the next byte of a request. It is refreshed before every read, so an
-// actively-progressing exchange of many requests never trips it - only a
-// connection that stops sending mid-request (or between requests) does.
+// defaultReadTimeout bounds how long a read may wait once a request has
+// already started arriving (the framer holds some bytes but not yet a full
+// request). It is deliberately short: a client that started sending
+// something and then stalls is more suspicious than one that simply
+// hasn't sent its next request yet.
 const defaultReadTimeout = 5 * time.Second
+
+// defaultIdleTimeout bounds how long a read may wait when nothing has
+// arrived since the last request completed (the framer is empty) - i.e.
+// how long a persistent connection is kept open waiting for a new request
+// to even begin. It is more generous than defaultReadTimeout: a client
+// legitimately reusing a keep-alive connection may pause between requests
+// longer than it should ever stall mid-request. Both are refreshed before
+// every read, so an active exchange of many requests never trips either.
+const defaultIdleTimeout = 60 * time.Second
 
 func main() {
 	addr := flag.String("addr", ":0", "TCP address to listen on (host:port); :0 picks an ephemeral free port")
@@ -82,13 +93,15 @@ func main() {
 // fully-buffered request before reading more bytes, so a read only ever
 // happens when the framer has nothing left to give it.
 func serveConn(conn net.Conn) {
-	serveConnWithTimeout(conn, defaultReadTimeout)
+	serveConnWithTimeout(conn, defaultIdleTimeout, defaultReadTimeout)
 }
 
-// serveConnWithTimeout is serveConn with an injectable read timeout, so
+// serveConnWithTimeout is serveConn with injectable idle/read timeouts, so
 // tests can exercise timeout behavior in milliseconds instead of waiting on
-// the production default.
-func serveConnWithTimeout(conn net.Conn, readTimeout time.Duration) {
+// the production defaults. Before each read, it picks whichever timeout
+// applies: idleTimeout if the framer is currently empty (waiting for a new
+// request to start), readTimeout if a request is already partway in.
+func serveConnWithTimeout(conn net.Conn, idleTimeout, readTimeout time.Duration) {
 	defer conn.Close()
 
 	framer := reqframe.NewFramer()
@@ -99,7 +112,12 @@ func serveConnWithTimeout(conn net.Conn, readTimeout time.Duration) {
 			return
 		}
 
-		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		timeout := idleTimeout
+		if framer.Pending() > 0 {
+			timeout = readTimeout
+		}
+		conn.SetReadDeadline(time.Now().Add(timeout))
+
 		n, err := conn.Read(readBuf)
 		if n > 0 {
 			framer.Feed(readBuf[:n])
@@ -129,7 +147,9 @@ func drainBufferedRequests(conn net.Conn, framer *reqframe.Framer) bool {
 	for {
 		raw, ok, err := framer.Next()
 		if err != nil {
-			resp := httpmsg.NewResponse(fallbackVersion, httpmsg.StatusBadRequest, httpmsg.StatusBadRequest.ReasonPhrase())
+			// The connection is closing regardless of whether this write
+			// succeeds, so the response honestly says so too.
+			resp := httpmsg.NewCloseResponse(fallbackVersion, httpmsg.StatusBadRequest, httpmsg.StatusBadRequest.ReasonPhrase())
 			_ = writeResponse(conn, resp)
 			return false
 		}
@@ -144,8 +164,10 @@ func drainBufferedRequests(conn net.Conn, framer *reqframe.Framer) bool {
 
 // handleRequest runs one framed request through parsing, validation,
 // routing, and response construction, then writes the response. It
-// returns false only when writing the response itself fails, which is a
-// connection-level failure the caller must act on.
+// returns false when writing the response itself fails (a connection-level
+// failure), or when the request itself asked to close the connection via
+// its own Connection: close header - in which case the write may have
+// succeeded, but the caller must still stop serving this connection.
 func handleRequest(conn net.Conn, raw []byte) bool {
 	req, err := httpmsg.ParseRequest(raw)
 	if err != nil {
@@ -153,10 +175,22 @@ func handleRequest(conn net.Conn, raw []byte) bool {
 		return writeResponse(conn, resp)
 	}
 
+	closeRequested := clientRequestedClose(req)
 	result := validate.Validate(req)
 	decision := router.Route(req, result)
-	resp := router.Respond(decision, req.Version)
-	return writeResponse(conn, resp)
+	resp := router.Respond(decision, req.Version, closeRequested)
+
+	if !writeResponse(conn, resp) {
+		return false
+	}
+	return !closeRequested
+}
+
+// clientRequestedClose reports whether req's own Connection header asked
+// for the connection to be closed after this response.
+func clientRequestedClose(req httpmsg.Request) bool {
+	value, ok := req.Headers.Get("Connection")
+	return ok && strings.EqualFold(value, "close")
 }
 
 func writeResponse(conn net.Conn, resp httpmsg.Response) bool {

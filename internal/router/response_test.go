@@ -26,7 +26,7 @@ func TestRespond_MapsOutcomeToStatusAndBody(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			resp := router.Respond(c.decision, "HTTP/1.1")
+			resp := router.Respond(c.decision, "HTTP/1.1", false)
 			if resp.Status != c.wantStatus {
 				t.Errorf("Status = %d, want %d", resp.Status, c.wantStatus)
 			}
@@ -35,6 +35,32 @@ func TestRespond_MapsOutcomeToStatusAndBody(t *testing.T) {
 			}
 			if resp.Version != "HTTP/1.1" {
 				t.Errorf("Version = %q, want HTTP/1.1", resp.Version)
+			}
+			if got, _ := resp.Headers.Get("Connection"); got != "keep-alive" {
+				t.Errorf("Connection = %q, want keep-alive", got)
+			}
+		})
+	}
+}
+
+// close=true must be reflected in the Connection header regardless of
+// which outcome produced the response - the client asked to close after
+// this response, independent of its status.
+func TestRespond_CloseReflectsInConnectionHeader(t *testing.T) {
+	cases := []struct {
+		name     string
+		decision router.Decision
+	}{
+		{"ok", router.Decision{Outcome: router.OutcomeOK, Result: 5}},
+		{"bad_request", router.Decision{Outcome: router.OutcomeBadRequest}},
+		{"not_found", router.Decision{Outcome: router.OutcomeNotFound}},
+		{"method_not_allowed", router.Decision{Outcome: router.OutcomeMethodNotAllowed}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := router.Respond(c.decision, "HTTP/1.1", true)
+			if got, _ := resp.Headers.Get("Connection"); got != "close" {
+				t.Errorf("Connection = %q, want close", got)
 			}
 		})
 	}

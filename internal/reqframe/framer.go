@@ -47,6 +47,15 @@ func NewFramer() *Framer {
 	return &Framer{}
 }
 
+// Pending reports how many bytes are currently buffered with no complete
+// request extracted from them yet. Callers can use this to distinguish an
+// idle connection (0 - nothing has arrived since the last request) from
+// one with a request already partway in (non-zero), without reaching into
+// the Framer's internal buffer.
+func (f *Framer) Pending() int {
+	return len(f.buf)
+}
+
 // Feed appends newly read bytes to the framer's persistent buffer. It does
 // no scanning itself; call Next to check for a complete request.
 func (f *Framer) Feed(data []byte) {

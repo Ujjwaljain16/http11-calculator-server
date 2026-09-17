@@ -16,6 +16,19 @@ type Response struct {
 // not an assumed character count), and Connection: keep-alive. version is
 // normally the request's own HTTP-version token, echoed back.
 func NewResponse(version string, status Status, body string) Response {
+	return newResponse(version, status, body, "keep-alive")
+}
+
+// NewCloseResponse is NewResponse but with Connection: close instead of
+// keep-alive - for the last response on a connection that is about to be
+// closed, whether because the client asked for that (its own request had
+// a Connection: close header) or because the server itself decided the
+// connection can't continue.
+func NewCloseResponse(version string, status Status, body string) Response {
+	return newResponse(version, status, body, "close")
+}
+
+func newResponse(version string, status Status, body, connection string) Response {
 	bodyBytes := []byte(body)
 	return Response{
 		Version: version,
@@ -23,7 +36,7 @@ func NewResponse(version string, status Status, body string) Response {
 		Headers: Headers{
 			{Name: "Content-Type", Value: "text/plain"},
 			{Name: "Content-Length", Value: strconv.Itoa(len(bodyBytes))},
-			{Name: "Connection", Value: "keep-alive"},
+			{Name: "Connection", Value: connection},
 		},
 		Body: bodyBytes,
 	}
