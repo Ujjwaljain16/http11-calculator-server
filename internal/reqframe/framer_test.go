@@ -2,6 +2,7 @@ package reqframe_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -9,20 +10,32 @@ import (
 	"calcserver/internal/reqframe"
 )
 
+// next is a small test helper: it fails the test on an unexpected framing
+// error, so every existing (non-size-limit) test can keep asserting only
+// on (bytes, ok) as before.
+func next(t *testing.T, f *reqframe.Framer) ([]byte, bool) {
+	t.Helper()
+	got, ok, err := f.Next()
+	if err != nil {
+		t.Fatalf("unexpected framing error: %v", err)
+	}
+	return got, ok
+}
+
 // 1. Terminator arrives in a single Feed.
 func TestNext_TerminatorInOneFeed(t *testing.T) {
 	f := reqframe.NewFramer()
 	req := []byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
 	f.Feed(req)
 
-	got, ok := f.Next()
+	got, ok := next(t, f)
 	if !ok {
 		t.Fatalf("expected a complete request, got none")
 	}
 	if !bytes.Equal(got, req) {
 		t.Fatalf("got %q, want %q", got, req)
 	}
-	if _, ok := f.Next(); ok {
+	if _, ok := next(t, f); ok {
 		t.Fatalf("expected no further request buffered")
 	}
 }
@@ -38,11 +51,11 @@ func TestNext_BoundarySplitAcrossFeeds(t *testing.T) {
 		t.Run(fmt.Sprintf("split_at_%d", sp), func(t *testing.T) {
 			f := reqframe.NewFramer()
 			f.Feed(full[:sp])
-			if _, ok := f.Next(); ok {
+			if _, ok := next(t, f); ok {
 				t.Fatalf("expected no complete request before remainder arrives")
 			}
 			f.Feed(full[sp:])
-			got, ok := f.Next()
+			got, ok := next(t, f)
 			if !ok {
 				t.Fatalf("expected a complete request after remainder arrives")
 			}
@@ -62,14 +75,14 @@ func TestNext_BoundarySplitExactExamplesFromSpec(t *testing.T) {
 	f := reqframe.NewFramer()
 	f.Feed(prefix)
 	for i, frag := range fragments {
-		if _, ok := f.Next(); ok {
+		if _, ok := next(t, f); ok {
 			t.Fatalf("unexpected complete request before terminator finished (fragment %d)", i)
 		}
 		f.Feed(frag)
 	}
 
 	want := append(append([]byte{}, prefix...), []byte("\r\n\r\n")...)
-	got, ok := f.Next()
+	got, ok := next(t, f)
 	if !ok {
 		t.Fatalf("expected a complete request after all terminator fragments fed")
 	}
@@ -82,12 +95,12 @@ func TestNext_BoundarySplitExactExamplesFromSpec(t *testing.T) {
 func TestNext_PartialHeadersThenCompletion(t *testing.T) {
 	f := reqframe.NewFramer()
 	f.Feed([]byte("GET /add?a=1&b"))
-	if _, ok := f.Next(); ok {
+	if _, ok := next(t, f); ok {
 		t.Fatalf("expected no complete request from partial headers")
 	}
 
 	f.Feed([]byte("=2 HTTP/1.1\r\nHost: x\r\n\r\n"))
-	got, ok := f.Next()
+	got, ok := next(t, f)
 	if !ok {
 		t.Fatalf("expected a complete request after remainder appended")
 	}
@@ -105,15 +118,15 @@ func TestNext_MultipleRequestsInOneFeed(t *testing.T) {
 	f := reqframe.NewFramer()
 	f.Feed(append(append([]byte{}, req1...), req2...))
 
-	got1, ok := f.Next()
+	got1, ok := next(t, f)
 	if !ok || !bytes.Equal(got1, req1) {
 		t.Fatalf("request 1: got %q ok=%v, want %q", got1, ok, req1)
 	}
-	got2, ok := f.Next()
+	got2, ok := next(t, f)
 	if !ok || !bytes.Equal(got2, req2) {
 		t.Fatalf("request 2: got %q ok=%v, want %q", got2, ok, req2)
 	}
-	if _, ok := f.Next(); ok {
+	if _, ok := next(t, f); ok {
 		t.Fatalf("expected no third request")
 	}
 }
@@ -129,20 +142,20 @@ func TestNext_MultipleRequestsPlusPartialThird(t *testing.T) {
 	combined := append(append(append([]byte{}, req1...), req2...), req3Partial...)
 	f.Feed(combined)
 
-	got1, ok := f.Next()
+	got1, ok := next(t, f)
 	if !ok || !bytes.Equal(got1, req1) {
 		t.Fatalf("request 1: got %q ok=%v, want %q", got1, ok, req1)
 	}
-	got2, ok := f.Next()
+	got2, ok := next(t, f)
 	if !ok || !bytes.Equal(got2, req2) {
 		t.Fatalf("request 2: got %q ok=%v, want %q", got2, ok, req2)
 	}
-	if _, ok := f.Next(); ok {
+	if _, ok := next(t, f); ok {
 		t.Fatalf("expected request 3 to still be incomplete")
 	}
 
 	f.Feed(req3Full[len(req3Partial):])
-	got3, ok := f.Next()
+	got3, ok := next(t, f)
 	if !ok || !bytes.Equal(got3, req3Full) {
 		t.Fatalf("request 3: got %q ok=%v, want %q", got3, ok, req3Full)
 	}
@@ -158,16 +171,16 @@ func TestNext_BoundarySplitWithFollowingRequest(t *testing.T) {
 
 	f := reqframe.NewFramer()
 	f.Feed(combined[:splitAt])
-	if _, ok := f.Next(); ok {
+	if _, ok := next(t, f); ok {
 		t.Fatalf("expected no complete request before terminator completes")
 	}
 	f.Feed(combined[splitAt:])
 
-	got1, ok := f.Next()
+	got1, ok := next(t, f)
 	if !ok || !bytes.Equal(got1, req1) {
 		t.Fatalf("request 1: got %q ok=%v, want %q", got1, ok, req1)
 	}
-	got2, ok := f.Next()
+	got2, ok := next(t, f)
 	if !ok || !bytes.Equal(got2, req2) {
 		t.Fatalf("request 2: got %q ok=%v, want %q", got2, ok, req2)
 	}
@@ -177,28 +190,28 @@ func TestNext_BoundarySplitWithFollowingRequest(t *testing.T) {
 func TestNext_EmptyAndTinyInputs(t *testing.T) {
 	t.Run("zero_bytes", func(t *testing.T) {
 		f := reqframe.NewFramer()
-		if _, ok := f.Next(); ok {
+		if _, ok := next(t, f); ok {
 			t.Fatalf("expected no request from an empty buffer")
 		}
 	})
 	t.Run("one_byte", func(t *testing.T) {
 		f := reqframe.NewFramer()
 		f.Feed([]byte("G"))
-		if _, ok := f.Next(); ok {
+		if _, ok := next(t, f); ok {
 			t.Fatalf("expected no request from a single byte")
 		}
 	})
 	t.Run("fewer_than_four_bytes", func(t *testing.T) {
 		f := reqframe.NewFramer()
 		f.Feed([]byte("\r\n\r"))
-		if _, ok := f.Next(); ok {
+		if _, ok := next(t, f); ok {
 			t.Fatalf("expected no request from 3 bytes")
 		}
 	})
 	t.Run("arbitrary_bytes_no_terminator", func(t *testing.T) {
 		f := reqframe.NewFramer()
 		f.Feed([]byte("this is not a terminated request at all, just plain bytes"))
-		if _, ok := f.Next(); ok {
+		if _, ok := next(t, f); ok {
 			t.Fatalf("expected no request without a terminator")
 		}
 	})
@@ -212,7 +225,7 @@ func TestNext_BytePreservationWithArbitraryBytes(t *testing.T) {
 
 	f := reqframe.NewFramer()
 	f.Feed(req)
-	got, ok := f.Next()
+	got, ok := next(t, f)
 	if !ok {
 		t.Fatalf("expected a complete request")
 	}
@@ -229,7 +242,7 @@ func TestNext_StopsAtFirstTerminatorWhenMultiplePresent(t *testing.T) {
 	f := reqframe.NewFramer()
 	f.Feed(append(append([]byte{}, req1...), trailingLookalike...))
 
-	got, ok := f.Next()
+	got, ok := next(t, f)
 	if !ok {
 		t.Fatalf("expected a complete request")
 	}
@@ -247,10 +260,10 @@ func TestNext_BufferedSecondRequestNeedsNoFurtherFeed(t *testing.T) {
 	f := reqframe.NewFramer()
 	f.Feed(append(append([]byte{}, req1...), req2...))
 
-	if _, ok := f.Next(); !ok {
+	if _, ok := next(t, f); !ok {
 		t.Fatalf("expected first request")
 	}
-	got2, ok := f.Next()
+	got2, ok := next(t, f)
 	if !ok {
 		t.Fatalf("expected second request to already be buffered")
 	}
@@ -266,7 +279,7 @@ func TestNext_ExtractedRequestIsNotCorruptedByLaterFeeds(t *testing.T) {
 
 	f := reqframe.NewFramer()
 	f.Feed(req1)
-	got1, ok := f.Next()
+	got1, ok := next(t, f)
 	if !ok {
 		t.Fatalf("expected first request")
 	}
@@ -300,7 +313,7 @@ func TestNext_FragmentationIsOrderIndependent(t *testing.T) {
 			f.Feed(req[pos : pos+chunk])
 			pos += chunk
 
-			if got, ok = f.Next(); ok {
+			if got, ok = next(t, f); ok {
 				break
 			}
 		}
@@ -313,8 +326,73 @@ func TestNext_FragmentationIsOrderIndependent(t *testing.T) {
 		if !bytes.Equal(got, req) {
 			t.Fatalf("trial %d: got %q, want %q", trial, got, req)
 		}
-		if _, ok := f.Next(); ok {
+		if _, ok := next(t, f); ok {
 			t.Fatalf("trial %d: unexpected extra buffered request", trial)
 		}
+	}
+}
+
+// --- Phase 8: request size limit ---
+
+// An incomplete request that grows past MaxRequestSize without ever
+// producing a boundary must report ErrRequestTooLarge, not hang forever
+// waiting for more bytes to complete a terminator that may never come.
+func TestNext_OversizedIncompleteRequestIsFatal(t *testing.T) {
+	f := reqframe.NewFramer()
+	f.Feed(bytes.Repeat([]byte("x"), reqframe.MaxRequestSize+1))
+
+	_, ok, err := f.Next()
+	if ok {
+		t.Fatalf("expected no complete request to be extracted")
+	}
+	if !errors.Is(err, reqframe.ErrRequestTooLarge) {
+		t.Fatalf("expected ErrRequestTooLarge, got %v", err)
+	}
+}
+
+// A request exactly at the limit, still with no terminator, is also fatal -
+// the limit is a hard ceiling on how long the search can keep growing.
+func TestNext_ExactlyAtLimitWithNoTerminatorIsFatal(t *testing.T) {
+	f := reqframe.NewFramer()
+	f.Feed(bytes.Repeat([]byte("x"), reqframe.MaxRequestSize))
+
+	_, ok, err := f.Next()
+	if ok {
+		t.Fatalf("expected no complete request to be extracted")
+	}
+	if err != nil {
+		t.Fatalf("exactly MaxRequestSize bytes with no terminator should not yet be fatal, got %v", err)
+	}
+
+	// One more byte with still no terminator tips it over.
+	f.Feed([]byte("x"))
+	_, ok, err = f.Next()
+	if ok {
+		t.Fatalf("expected no complete request to be extracted")
+	}
+	if !errors.Is(err, reqframe.ErrRequestTooLarge) {
+		t.Fatalf("expected ErrRequestTooLarge, got %v", err)
+	}
+}
+
+// A legitimately large-but-under-the-limit buffer must still work: the
+// limit only fires when a boundary is never found, not merely because the
+// buffer is large.
+func TestNext_LargeButUnderLimitStillCompletes(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), reqframe.MaxRequestSize-100)
+	req := append(append([]byte{}, body...), []byte("\r\n\r\n")...)
+
+	f := reqframe.NewFramer()
+	f.Feed(req)
+
+	got, ok, err := f.Next()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected a complete request")
+	}
+	if !bytes.Equal(got, req) {
+		t.Fatalf("byte mismatch on a large but valid request")
 	}
 }

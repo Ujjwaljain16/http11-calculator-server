@@ -8,11 +8,19 @@ import (
 	"time"
 
 	"calcserver/internal/httpmsg"
+	"calcserver/internal/reqframe"
 )
 
 // startCalcServer runs the same accept-loop/serveConn logic main() uses,
 // on a real ephemeral TCP port, so tests exercise the actual orchestration.
 func startCalcServer(t *testing.T) net.Listener {
+	return startCalcServerWithTimeout(t, defaultReadTimeout)
+}
+
+// startCalcServerWithTimeout is startCalcServer with an injectable read
+// timeout, so timeout behavior can be tested in milliseconds instead of
+// waiting on defaultReadTimeout.
+func startCalcServerWithTimeout(t *testing.T, readTimeout time.Duration) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -26,11 +34,24 @@ func startCalcServer(t *testing.T) net.Listener {
 			if err != nil {
 				return
 			}
-			go serveConn(conn)
+			go serveConnWithTimeout(conn, readTimeout)
 		}
 	}()
 
 	return ln
+}
+
+// expectClosed reads one byte with a bounded deadline and fails the test if
+// the read succeeds - used to assert the server closed its side of the
+// connection (EOF or a reset both count) without hanging the test if it
+// didn't.
+func expectClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	if n, err := conn.Read(buf); err == nil {
+		t.Fatalf("expected the connection to be closed, got n=%d bytes with no error", n)
+	}
 }
 
 func dial(t *testing.T, ln net.Listener) net.Conn {
@@ -168,4 +189,49 @@ func TestServeConn_UnparseableRequestGetsBadRequestNotACrash(t *testing.T) {
 	// The connection must still be usable afterward.
 	conn.Write([]byte("GET /add?a=1&b=1 HTTP/1.1\r\nHost: x\r\n\r\n"))
 	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "2"))
+}
+
+// An incomplete request that never finds a boundary and exceeds
+// reqframe.MaxRequestSize must terminate the connection - and must not
+// affect the listener's ability to accept a fresh, independent connection.
+func TestServeConn_OversizedIncompleteRequestClosesConnection(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	oversized := bytes.Repeat([]byte("x"), reqframe.MaxRequestSize+1)
+	conn.Write(oversized)
+	expectClosed(t, conn)
+
+	second := dial(t, ln)
+	second.Write([]byte("GET /add?a=1&b=1 HTTP/1.1\r\nHost: x\r\n\r\n"))
+	readExactly(t, second, expectedBytes(t, httpmsg.StatusOK, "2"))
+}
+
+// A request that is missing its final blank line, followed by the client
+// closing its write side, must terminate the connection cleanly with no
+// response - there is no complete request to route anything to.
+func TestServeConn_IncompleteRequestThenEOFTerminatesCleanly(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	conn.Write([]byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: localhost"))
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.CloseWrite()
+	} else {
+		t.Fatalf("expected a *net.TCPConn")
+	}
+
+	expectClosed(t, conn)
+}
+
+// A connection that sends an incomplete request and then stops entirely
+// (no EOF, no more bytes) must eventually be closed by the server's read
+// timeout, not held open forever.
+func TestServeConn_ReadTimeoutClosesIdleConnection(t *testing.T) {
+	const testReadTimeout = 100 * time.Millisecond
+	ln := startCalcServerWithTimeout(t, testReadTimeout)
+	conn := dial(t, ln)
+
+	conn.Write([]byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x"))
+	expectClosed(t, conn)
 }

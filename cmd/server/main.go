@@ -5,10 +5,12 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"time"
 
 	"calcserver/internal/httpmsg"
 	"calcserver/internal/reqframe"
@@ -21,8 +23,15 @@ import (
 const fallbackVersion = "HTTP/1.1"
 
 // readChunkSize is how many bytes serveConn reads from the socket at a
-// time; it has nothing to do with the request-size cap Phase 11 will add.
+// time; unrelated to reqframe.MaxRequestSize, which bounds accumulated
+// request bytes, not a single read's size.
 const readChunkSize = 4096
+
+// defaultReadTimeout bounds how long a connection can sit idle waiting for
+// the next byte of a request. It is refreshed before every read, so an
+// actively-progressing exchange of many requests never trips it - only a
+// connection that stops sending mid-request (or between requests) does.
+const defaultReadTimeout = 5 * time.Second
 
 func main() {
 	addr := flag.String("addr", ":0", "TCP address to listen on (host:port); :0 picks an ephemeral free port")
@@ -39,6 +48,13 @@ func main() {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			// A closed listener means there is nothing left to accept and
+			// never will be again - keep looping would just spin logging
+			// the same error forever. Any other Accept error is treated as
+			// transient: log it and keep serving other clients.
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			log.Printf("accept: %v", err)
 			continue
 		}
@@ -51,6 +67,13 @@ func main() {
 // fully-buffered request before reading more bytes, so a read only ever
 // happens when the framer has nothing left to give it.
 func serveConn(conn net.Conn) {
+	serveConnWithTimeout(conn, defaultReadTimeout)
+}
+
+// serveConnWithTimeout is serveConn with an injectable read timeout, so
+// tests can exercise timeout behavior in milliseconds instead of waiting on
+// the production default.
+func serveConnWithTimeout(conn net.Conn, readTimeout time.Duration) {
 	defer conn.Close()
 
 	framer := reqframe.NewFramer()
@@ -61,13 +84,15 @@ func serveConn(conn net.Conn) {
 			return
 		}
 
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
 		n, err := conn.Read(readBuf)
 		if n > 0 {
 			framer.Feed(readBuf[:n])
 		}
 		if err != nil {
 			// A final chunk may have just completed a request; process it
-			// before giving up the connection on EOF or a read error.
+			// before giving up the connection on EOF, a timeout, or a read
+			// error - all three are connection-level failures from here on.
 			drainBufferedRequests(conn, framer)
 			return
 		}
@@ -75,11 +100,18 @@ func serveConn(conn net.Conn) {
 }
 
 // drainBufferedRequests processes every complete request already sitting
-// in framer, without touching the socket for reads. It returns false if a
-// response failed to write, meaning the connection is no longer usable.
+// in framer, without touching the socket for reads. It returns false if
+// the connection is no longer usable: a response failed to write, or the
+// framer reported a fatal framing error (its buffered, still-incomplete
+// request grew past reqframe.MaxRequestSize). A fatal framing error has no
+// safely identified request boundary, so nothing is written back - the
+// connection is simply closed by the caller.
 func drainBufferedRequests(conn net.Conn, framer *reqframe.Framer) bool {
 	for {
-		raw, ok := framer.Next()
+		raw, ok, err := framer.Next()
+		if err != nil {
+			return false
+		}
 		if !ok {
 			return true
 		}
