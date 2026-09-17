@@ -103,13 +103,19 @@ func serveConnWithTimeout(conn net.Conn, readTimeout time.Duration) {
 // in framer, without touching the socket for reads. It returns false if
 // the connection is no longer usable: a response failed to write, or the
 // framer reported a fatal framing error (its buffered, still-incomplete
-// request grew past reqframe.MaxRequestSize). A fatal framing error has no
-// safely identified request boundary, so nothing is written back - the
-// connection is simply closed by the caller.
+// request grew past reqframe.MaxRequestSize).
+//
+// A fatal framing error is not an ordinary malformed-request 400: there is
+// no safely identified request boundary, so the connection can never be
+// reused afterward. As a courtesy, one best-effort 400 is still attempted
+// (matching this project's documented design) before closing - whether or
+// not that write succeeds, the connection is never read from again.
 func drainBufferedRequests(conn net.Conn, framer *reqframe.Framer) bool {
 	for {
 		raw, ok, err := framer.Next()
 		if err != nil {
+			resp := httpmsg.NewResponse(fallbackVersion, httpmsg.StatusBadRequest, httpmsg.StatusBadRequest.ReasonPhrase())
+			_ = writeResponse(conn, resp)
 			return false
 		}
 		if !ok {

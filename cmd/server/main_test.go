@@ -194,14 +194,23 @@ func TestServeConn_UnparseableRequestGetsBadRequestNotACrash(t *testing.T) {
 }
 
 // An incomplete request that never finds a boundary and exceeds
-// reqframe.MaxRequestSize must terminate the connection - and must not
-// affect the listener's ability to accept a fresh, independent connection.
-func TestServeConn_OversizedIncompleteRequestClosesConnection(t *testing.T) {
+// reqframe.MaxRequestSize gets a best-effort 400 Bad Request (matching
+// this project's documented plan.md design - unlike an ordinary
+// malformed-but-complete request, this is not recoverable), and the
+// connection then closes. The listener must remain able to accept a
+// fresh, independent connection afterward. The 400 response is read and
+// parsed independently from the raw socket bytes (readWireResponse),
+// not manufactured via httpmsg.NewResponse.
+func TestServeConn_OversizedIncompleteRequestGetsBadRequestThenCloses(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
 
 	oversized := bytes.Repeat([]byte("x"), reqframe.MaxRequestSize+1)
 	conn.Write(oversized)
+
+	resp := readWireResponse(t, conn)
+	assertResponse(t, resp, 400, "Bad Request", "Bad Request")
+
 	expectClosed(t, conn)
 
 	second := dial(t, ln)
