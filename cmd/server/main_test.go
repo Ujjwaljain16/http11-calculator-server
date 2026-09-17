@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,4 +236,209 @@ func TestServeConn_ReadTimeoutClosesIdleConnection(t *testing.T) {
 
 	conn.Write([]byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x"))
 	expectClosed(t, conn)
+}
+
+// --- Phase 9: end-to-end acceptance test ---
+//
+// wireResponse and readWireResponse deliberately do NOT reuse httpmsg's
+// writer/parser: they exist to independently verify what the server
+// actually put on the real TCP wire, not to re-check the writer's own
+// internal correctness (that's Phase 6's job).
+
+type wireResponse struct {
+	version       string
+	code          int
+	reason        string
+	headers       map[string]string
+	body          []byte
+	contentLength int
+	rawHeaderPart []byte // header block through the blank line, as received
+}
+
+func writeRequest(t *testing.T, conn net.Conn, req string) {
+	t.Helper()
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("writing request: %v", err)
+	}
+}
+
+// readWireResponse reads one complete response from conn: it reads until
+// "\r\n\r\n" is seen (never assuming one Read call delivers the whole
+// response), parses the status line and headers, reads exactly
+// Content-Length more body bytes, and fails the test if the bytes actually
+// read don't match Content-Length exactly.
+func readWireResponse(t *testing.T, conn net.Conn) wireResponse {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+	var buf []byte
+	chunk := make([]byte, 4096)
+	headerEnd := -1
+
+	for headerEnd < 0 {
+		n, err := conn.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+			headerEnd = bytes.Index(buf, []byte("\r\n\r\n"))
+		}
+		if err != nil && headerEnd < 0 {
+			t.Fatalf("reading response headers: %v", err)
+		}
+	}
+
+	rawHeaderPart := append([]byte{}, buf[:headerEnd+4]...)
+	bodySoFar := append([]byte{}, buf[headerEnd+4:]...)
+
+	lines := strings.Split(string(buf[:headerEnd]), "\r\n")
+	statusParts := strings.SplitN(lines[0], " ", 3)
+	if len(statusParts) != 3 {
+		t.Fatalf("malformed status line: %q", lines[0])
+	}
+	code, err := strconv.Atoi(statusParts[1])
+	if err != nil {
+		t.Fatalf("malformed status code %q: %v", statusParts[1], err)
+	}
+
+	headers := map[string]string{}
+	for _, line := range lines[1:] {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("malformed header line: %q", line)
+		}
+		headers[name] = strings.TrimSpace(value)
+	}
+
+	contentLengthStr, ok := headers["Content-Length"]
+	if !ok {
+		t.Fatalf("response has no Content-Length header")
+	}
+	contentLength, err := strconv.Atoi(contentLengthStr)
+	if err != nil {
+		t.Fatalf("malformed Content-Length %q: %v", contentLengthStr, err)
+	}
+
+	for len(bodySoFar) < contentLength {
+		n, err := conn.Read(chunk)
+		if n > 0 {
+			bodySoFar = append(bodySoFar, chunk[:n]...)
+		}
+		if err != nil && len(bodySoFar) < contentLength {
+			t.Fatalf("reading response body: %v", err)
+		}
+	}
+	if len(bodySoFar) != contentLength {
+		t.Fatalf("read %d body bytes, Content-Length declared %d (framing bug): %q", len(bodySoFar), contentLength, bodySoFar)
+	}
+
+	return wireResponse{
+		version:       statusParts[0],
+		code:          code,
+		reason:        statusParts[2],
+		headers:       headers,
+		body:          bodySoFar,
+		contentLength: contentLength,
+		rawHeaderPart: rawHeaderPart,
+	}
+}
+
+// assertProperCRLF fails the test if raw contains a bare '\n' not preceded
+// by '\r' anywhere - proving the server's actual wire bytes use CRLF, not
+// merely LF, framing.
+func assertProperCRLF(t *testing.T, raw []byte) {
+	t.Helper()
+	if !bytes.HasSuffix(raw, []byte("\r\n\r\n")) {
+		t.Fatalf("response header block does not end with a CRLF blank line: %q", raw)
+	}
+	for i, b := range raw {
+		if b == '\n' && (i == 0 || raw[i-1] != '\r') {
+			t.Fatalf("found a bare '\\n' at byte %d not preceded by '\\r': %q", i, raw)
+		}
+	}
+}
+
+func assertResponse(t *testing.T, resp wireResponse, wantCode int, wantReason, wantBody string) {
+	t.Helper()
+	if resp.version != "HTTP/1.1" {
+		t.Errorf("Version = %q, want HTTP/1.1", resp.version)
+	}
+	if resp.code != wantCode {
+		t.Errorf("Status code = %d, want %d", resp.code, wantCode)
+	}
+	if resp.reason != wantReason {
+		t.Errorf("Reason phrase = %q, want %q", resp.reason, wantReason)
+	}
+	if ct := resp.headers["Content-Type"]; ct != "text/plain" {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	if conn := resp.headers["Connection"]; conn != "keep-alive" {
+		t.Errorf("Connection = %q, want keep-alive", conn)
+	}
+	if len(resp.body) != resp.contentLength {
+		t.Errorf("len(body) = %d, Content-Length = %d", len(resp.body), resp.contentLength)
+	}
+	if string(resp.body) != wantBody {
+		t.Errorf("Body = %q, want %q", resp.body, wantBody)
+	}
+}
+
+// TestServer_EndToEndPersistentConnection is the canonical proof of the
+// assignment's central requirement: "build a calculator that stays on the
+// line." One real TCP connection carries seven strictly-sequenced
+// request/response round trips - four successes, an application error
+// (400), an unknown route (404), and a final success - proving the
+// connection survives both kinds of error and is still the same live
+// connection throughout.
+func TestServer_EndToEndPersistentConnection(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	// 1. add
+	writeRequest(t, conn, "GET /add?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp := readWireResponse(t, conn)
+	assertResponse(t, resp, 200, "OK", "15")
+	assertProperCRLF(t, resp.rawHeaderPart) // raw wire CRLF check (once is enough)
+
+	// 2. sub
+	writeRequest(t, conn, "GET /sub?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp = readWireResponse(t, conn)
+	assertResponse(t, resp, 200, "OK", "5")
+
+	// 3. mul
+	writeRequest(t, conn, "GET /mul?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp = readWireResponse(t, conn)
+	assertResponse(t, resp, 200, "OK", "50")
+
+	// 4. div
+	writeRequest(t, conn, "GET /div?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp = readWireResponse(t, conn)
+	assertResponse(t, resp, 200, "OK", "2")
+
+	// 5. application-level error on a completely well-framed request: 400,
+	// connection must stay open.
+	writeRequest(t, conn, "GET /add?a=10&b=not-a-number HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp = readWireResponse(t, conn)
+	assertResponse(t, resp, 400, "Bad Request", "Bad Request")
+
+	// 6. unknown route: 404, connection must still stay open.
+	writeRequest(t, conn, "GET /does-not-exist?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp = readWireResponse(t, conn)
+	assertResponse(t, resp, 404, "Not Found", "Not Found")
+
+	// 7. liveness proof: a further valid request succeeds on this exact
+	// same TCP connection after two consecutive error responses.
+	writeRequest(t, conn, "GET /add?a=100&b=23 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp = readWireResponse(t, conn)
+	assertResponse(t, resp, 200, "OK", "123")
+}
+
+// 405 has no existing real-TCP coverage (only router-level unit tests), so
+// this small dedicated test adds it without lengthening the primary
+// seven-request sequence above.
+func TestServer_MethodNotAllowedOverRealConnection(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	writeRequest(t, conn, "POST /add?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	resp := readWireResponse(t, conn)
+	assertResponse(t, resp, 405, "Method Not Allowed", "Method Not Allowed")
 }
