@@ -396,3 +396,114 @@ func TestNext_LargeButUnderLimitStillCompletes(t *testing.T) {
 		t.Fatalf("byte mismatch on a large but valid request")
 	}
 }
+
+// --- Phase 10: TCP fragmentation / request-boundary tests ---
+//
+// Split-\r\n\r\n coverage (every interior position of the 4-byte
+// terminator: "\r|\n\r\n", "\r\n|\r\n", "\r\n\r|\n") is already exhaustively
+// covered by TestNext_BoundarySplitAcrossFeeds above; extracted-request
+// immutability by TestNext_ExtractedRequestIsNotCorruptedByLaterFeeds; a
+// partial third request retained behind two complete ones by
+// TestNext_MultipleRequestsPlusPartialThird; and single-request random
+// fragmentation by TestNext_FragmentationIsOrderIndependent. None of those
+// are duplicated here.
+
+// A full request fed one byte at a time must produce no complete request
+// until the very last byte, then exactly the original bytes.
+func TestFramer_OneByteAtATime(t *testing.T) {
+	req := []byte("GET /add?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	f := reqframe.NewFramer()
+
+	for i, b := range req {
+		f.Feed([]byte{b})
+		if i < len(req)-1 {
+			if _, ok := next(t, f); ok {
+				t.Fatalf("unexpected complete request after byte %d of %d", i+1, len(req))
+			}
+		}
+	}
+
+	got, ok := next(t, f)
+	if !ok {
+		t.Fatalf("expected a complete request after the final byte")
+	}
+	if !bytes.Equal(got, req) {
+		t.Fatalf("got %q, want %q", got, req)
+	}
+	if _, ok := next(t, f); ok {
+		t.Fatalf("expected no further request")
+	}
+}
+
+// The narrowest possible terminator split (3 of 4 bytes in one Feed, the
+// final byte plus an entirely new request in the next) must still extract
+// both requests correctly. TestNext_BoundarySplitWithFollowingRequest above
+// covers a different (half-and-half) split point; this covers the specific
+// "\r\n\r | \n"+request2 pattern.
+func TestFramer_SplitTerminatorThenNextRequest(t *testing.T) {
+	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
+	req2 := []byte("GET /sub?a=5&b=3 HTTP/1.1\r\nHost: y\r\n\r\n")
+
+	f := reqframe.NewFramer()
+	f.Feed(req1[:len(req1)-1])
+	if _, ok := next(t, f); ok {
+		t.Fatalf("expected no complete request before the terminator's final byte")
+	}
+
+	f.Feed(append([]byte{req1[len(req1)-1]}, req2...))
+
+	got1, ok := next(t, f)
+	if !ok || !bytes.Equal(got1, req1) {
+		t.Fatalf("request 1: got %q ok=%v, want %q", got1, ok, req1)
+	}
+	got2, ok := next(t, f)
+	if !ok || !bytes.Equal(got2, req2) {
+		t.Fatalf("request 2: got %q ok=%v, want %q", got2, ok, req2)
+	}
+}
+
+// Three requests fragmented at a fixed, deterministic (non-random) sequence
+// of chunk sizes deliberately not aligned to any request's boundaries must
+// still be extracted as exactly [request1, request2, request3], with no
+// corruption, duplication, or omission.
+func TestFramer_MultipleRequestsAcrossArbitraryFragments(t *testing.T) {
+	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
+	req2 := []byte("GET /sub?a=5&b=3 HTTP/1.1\r\nHost: y\r\n\r\n")
+	req3 := []byte("GET /mul?a=6&b=7 HTTP/1.1\r\nHost: z\r\n\r\n")
+	combined := append(append(append([]byte{}, req1...), req2...), req3...)
+
+	// Fixed, deterministic chunk sizes (not random, not aligned to any
+	// request's length) - chosen only to guarantee frequent, uneven cuts.
+	chunkSizes := []int{1, 2, 5, 3, 8, 1, 13, 4, 6, 2, 9, 1, 17, 5}
+
+	f := reqframe.NewFramer()
+	var got [][]byte
+	pos, sizeIdx := 0, 0
+	for pos < len(combined) {
+		size := chunkSizes[sizeIdx%len(chunkSizes)]
+		sizeIdx++
+		if pos+size > len(combined) {
+			size = len(combined) - pos
+		}
+		f.Feed(combined[pos : pos+size])
+		pos += size
+
+		for {
+			raw, ok := next(t, f)
+			if !ok {
+				break
+			}
+			got = append(got, raw)
+		}
+	}
+
+	want := [][]byte{req1, req2, req3}
+	if len(got) != len(want) {
+		t.Fatalf("got %d requests, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if !bytes.Equal(got[i], want[i]) {
+			t.Fatalf("request %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}

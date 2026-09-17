@@ -442,3 +442,68 @@ func TestServer_MethodNotAllowedOverRealConnection(t *testing.T) {
 	resp := readWireResponse(t, conn)
 	assertResponse(t, resp, 405, "Method Not Allowed", "Method Not Allowed")
 }
+
+// --- Phase 10: real TCP fragmentation tests ---
+//
+// Phase 7's TestServeConn_MultipleRequestsBufferedInOneWrite already proves
+// "two complete requests in one client Write produce two responses" - not
+// duplicated here.
+
+// A single request delivered across four separate, test-controlled writes
+// (not one large Write left to the OS to fragment) must still produce
+// exactly one correct response.
+func TestServer_FragmentedRequestOverRealTCP(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	writeRequest(t, conn, "GET /add?a=10")
+	writeRequest(t, conn, "&b=5 HTTP/1.1\r\n")
+	writeRequest(t, conn, "Host: localhost\r\n")
+	writeRequest(t, conn, "\r\n")
+
+	resp := readWireResponse(t, conn)
+	assertResponse(t, resp, 200, "OK", "15")
+}
+
+// Splitting a request immediately before its final terminating byte must
+// not produce a premature response (proven with a short deadline, not a
+// sleep) and must produce the correct response once that byte arrives.
+func TestServer_SplitTerminatorOverRealTCP(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	full := "GET /add?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	writeRequest(t, conn, full[:len(full)-1])
+
+	conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatalf("expected no response before the terminator's final byte arrives")
+	}
+
+	writeRequest(t, conn, full[len(full)-1:])
+	resp := readWireResponse(t, conn)
+	assertResponse(t, resp, 200, "OK", "15")
+}
+
+// Two requests whose combined byte stream is split at points deliberately
+// crossing the boundary between them (not aligned to either request's
+// start or end) must each still produce the correct response, on the same
+// connection.
+func TestServer_MultipleRequestsCrossBoundaryFragmentsOverRealTCP(t *testing.T) {
+	ln := startCalcServer(t)
+	conn := dial(t, ln)
+
+	req1 := "GET /add?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	req2 := "GET /sub?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+	writeRequest(t, conn, req1[:10])           // "GET /add?a" - partway into request 1
+	writeRequest(t, conn, req1[10:]+req2[:15]) // rest of request 1 + partway into request 2
+	writeRequest(t, conn, req2[15:])           // rest of request 2
+
+	resp1 := readWireResponse(t, conn)
+	assertResponse(t, resp1, 200, "OK", "15")
+
+	resp2 := readWireResponse(t, conn)
+	assertResponse(t, resp2, 200, "OK", "5")
+}
