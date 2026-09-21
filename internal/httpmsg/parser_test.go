@@ -16,8 +16,8 @@ func TestParseRequest_ValidRequestLine(t *testing.T) {
 	if req.Method != "GET" {
 		t.Errorf("Method = %q, want GET", req.Method)
 	}
-	if req.Target != "/add?a=2&b=3" {
-		t.Errorf("Target = %q, want /add?a=2&b=3", req.Target)
+	if req.Path != "/add" {
+		t.Errorf("Path = %q, want /add", req.Path)
 	}
 	if req.Version != "HTTP/1.1" {
 		t.Errorf("Version = %q, want HTTP/1.1", req.Version)
@@ -102,9 +102,6 @@ func TestParseRequest_QueryParameterExtraction(t *testing.T) {
 	if got := req.Query.Get("op"); got != "noop" {
 		t.Errorf("op = %q, want noop", got)
 	}
-	if req.RawQuery != "a=2&b=3&op=noop" {
-		t.Errorf("RawQuery = %q, want a=2&b=3&op=noop", req.RawQuery)
-	}
 }
 
 // Empty and missing query values.
@@ -132,9 +129,6 @@ func TestParseRequest_EmptyAndMissingQueryValues(t *testing.T) {
 	}
 	if len(noQuery.Query) != 0 {
 		t.Errorf("expected no query parameters, got %v", noQuery.Query)
-	}
-	if noQuery.RawQuery != "" {
-		t.Errorf("RawQuery = %q, want empty", noQuery.RawQuery)
 	}
 }
 
@@ -166,9 +160,8 @@ func TestParseRequest_DuplicateHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	values := req.Headers.Values("Host")
-	if len(values) != 2 || values[0] != "first" || values[1] != "second" {
-		t.Fatalf("Host values = %v, want [first second]", values)
+	if len(req.Headers) != 2 || req.Headers[0].Value != "first" || req.Headers[1].Value != "second" {
+		t.Fatalf("Headers = %v, want two Host headers [first second]", req.Headers)
 	}
 	if got, _ := req.Headers.Get("Host"); got != "first" {
 		t.Errorf("Headers.Get(Host) = %q, want first (first occurrence)", got)

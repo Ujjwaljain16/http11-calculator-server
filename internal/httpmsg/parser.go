@@ -72,19 +72,17 @@ func ParseRequest(raw []byte) (Request, error) {
 		return Request{}, err
 	}
 
-	path, rawQuery, query, err := parseTarget(target)
+	path, query, err := parseTarget(target)
 	if err != nil {
 		return Request{}, err
 	}
 
 	return Request{
-		Method:   method,
-		Target:   target,
-		Path:     path,
-		RawQuery: rawQuery,
-		Query:    query,
-		Version:  version,
-		Headers:  headers,
+		Method:  method,
+		Path:    path,
+		Query:   query,
+		Version: version,
+		Headers: headers,
 	}, nil
 }
 
@@ -155,22 +153,22 @@ func parseHeaders(lines []string) (Headers, error) {
 	return headers, nil
 }
 
-func parseTarget(target string) (path, rawQuery string, query url.Values, err error) {
+func parseTarget(target string) (path string, query url.Values, err error) {
 	if !strings.HasPrefix(target, "/") {
-		return "", "", nil, fmt.Errorf("%w: request-target must be in origin-form, starting with '/': %q", ErrMalformedRequest, target)
+		return "", nil, fmt.Errorf("%w: request-target must be in origin-form, starting with '/': %q", ErrMalformedRequest, target)
 	}
 
 	rawPath, rawQuery, _ := strings.Cut(target, "?")
 
 	path, decodeErr := url.PathUnescape(rawPath)
 	if decodeErr != nil {
-		return "", "", nil, fmt.Errorf("%w: invalid percent-encoding in path: %v", ErrMalformedRequest, decodeErr)
+		return "", nil, fmt.Errorf("%w: invalid percent-encoding in path: %v", ErrMalformedRequest, decodeErr)
 	}
 
 	query, queryErr := url.ParseQuery(rawQuery)
 	if queryErr != nil {
-		return "", "", nil, fmt.Errorf("%w: invalid query string: %v", ErrMalformedRequest, queryErr)
+		return "", nil, fmt.Errorf("%w: invalid query string: %v", ErrMalformedRequest, queryErr)
 	}
 
-	return path, rawQuery, query, nil
+	return path, query, nil
 }

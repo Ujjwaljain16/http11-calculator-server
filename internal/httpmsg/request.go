@@ -15,16 +15,11 @@ import (
 // operations, ...) - that is validate and router's responsibility.
 type Request struct {
 	Method string
-	// Target is the request-target exactly as it appeared on the wire,
-	// e.g. "/add?a=2&b=3".
-	Target string
-	// Path is Target's path component, percent-decoded.
+	// Path is the request-target's path component, percent-decoded.
 	Path string
-	// RawQuery is Target's query component (after the first '?'), still
-	// percent-encoded. Empty if Target had no '?'.
-	RawQuery string
-	// Query holds RawQuery parsed into percent-decoded key/value pairs.
-	// Duplicate keys keep every value, in the order they appeared.
+	// Query holds the request-target's query string (after the first '?')
+	// parsed into percent-decoded key/value pairs. Duplicate keys keep
+	// every value, in the order they appeared.
 	Query url.Values
 	// Version is the request-line's HTTP-version token, e.g. "HTTP/1.1".
 	Version string
@@ -53,16 +48,4 @@ func (h Headers) Get(name string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// Values returns every value sent for headers named name (case-insensitive),
-// in the order they appeared. It returns nil if none were sent.
-func (h Headers) Values(name string) []string {
-	var vals []string
-	for _, hd := range h {
-		if strings.EqualFold(hd.Name, name) {
-			vals = append(vals, hd.Value)
-		}
-	}
-	return vals
 }
