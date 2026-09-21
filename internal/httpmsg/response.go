@@ -2,8 +2,7 @@ package httpmsg
 
 import "strconv"
 
-// Response is a response's contents, independent of sockets or wire bytes.
-// WriteResponse (writer.go) is what turns it into bytes.
+// A Response is an HTTP response. WriteResponse turns it into bytes.
 type Response struct {
 	Version string
 	Status  Status
@@ -11,19 +10,14 @@ type Response struct {
 	Body    []byte
 }
 
-// NewResponse builds a Response with the headers this server always sends:
-// Content-Type, Content-Length (computed from body's actual byte length,
-// not an assumed character count), and Connection: keep-alive. version is
-// normally the request's own HTTP-version token, echoed back.
+// NewResponse returns a plain-text response with Content-Length set to the
+// byte length of body and "Connection: keep-alive".
 func NewResponse(version string, status Status, body string) Response {
 	return newResponse(version, status, body, "keep-alive")
 }
 
-// NewCloseResponse is NewResponse but with Connection: close instead of
-// keep-alive - for the last response on a connection that is about to be
-// closed, whether because the client asked for that (its own request had
-// a Connection: close header) or because the server itself decided the
-// connection can't continue.
+// NewCloseResponse is like NewResponse but sets "Connection: close", for the
+// last response on a connection.
 func NewCloseResponse(version string, status Status, body string) Response {
 	return newResponse(version, status, body, "close")
 }

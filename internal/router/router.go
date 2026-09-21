@@ -1,8 +1,6 @@
-// Package router turns a parsed Request plus its validate.Result into an
-// in-memory routing Decision: known-path/GET/valid-params requests get
-// computed by calc; everything else gets one of the three failure
-// outcomes. Router never produces HTTP status lines or response bytes -
-// that translation happens in response.go.
+// Package router decides how to answer a parsed request: it selects the
+// arithmetic operation for the path and produces a Decision. Turning a
+// Decision into an HTTP response is done by Respond.
 package router
 
 import (
@@ -11,7 +9,7 @@ import (
 	"calcserver/internal/validate"
 )
 
-// Outcome names a routing decision without naming any HTTP status code.
+// An Outcome is the kind of answer a request should receive.
 type Outcome int
 
 const (
@@ -21,15 +19,14 @@ const (
 	OutcomeBadRequest
 )
 
-// Decision is the router's result. Result is meaningful only when
-// Outcome is OutcomeOK.
+// A Decision is the result of routing a request. Result is meaningful only
+// when Outcome is OutcomeOK.
 type Decision struct {
 	Outcome Outcome
 	Result  int64
 }
 
-// operations maps each supported path to its calculator function. An
-// unlisted path (e.g. "/pow") is exactly what makes a request unknown.
+// operations maps each supported path to its arithmetic function.
 var operations = map[string]func(a, b int64) (int64, error){
 	"/add": calc.Add,
 	"/sub": calc.Sub,
@@ -37,11 +34,12 @@ var operations = map[string]func(a, b int64) (int64, error){
 	"/div": calc.Div,
 }
 
-// Route decides what to do with req, given its already-computed validation
-// result v. It checks, in order: is the path one of the four supported
-// operations (else NotFound); is the method GET (else MethodNotAllowed);
-// did Host/"a"/"b" validate (else BadRequest); did the arithmetic itself
-// succeed - no division by zero, no overflow (else BadRequest).
+// Route decides the outcome for req, where v is the result of validating it.
+// The checks run in this order: unknown path gives OutcomeNotFound, a method
+// other than GET gives OutcomeMethodNotAllowed, failed validation gives
+// OutcomeBadRequest, and an arithmetic error (overflow or division by zero)
+// also gives OutcomeBadRequest. Otherwise the outcome is OutcomeOK with the
+// computed result.
 func Route(req httpmsg.Request, v validate.Result) Decision {
 	op, known := operations[req.Path]
 	if !known {

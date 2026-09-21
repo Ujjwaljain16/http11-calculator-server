@@ -1,8 +1,5 @@
-// Package validate checks a parsed Request's Host header and "a"/"b" query
-// parameters. It never looks at Method or Path and never decides whether an
-// operation or method is supported - that is routing's job. This package
-// only answers: if something downstream treats this as a calculator
-// request, are its Host and parameters usable?
+// Package validate checks the Host header and the "a" and "b" query
+// parameters of a parsed request. It does not look at the method or path.
 package validate
 
 import (
@@ -11,29 +8,28 @@ import (
 	"calcserver/internal/httpmsg"
 )
 
-// Param is one query parameter's validation outcome. Value is meaningful
-// only when OK is true.
+// A Param is the outcome of validating one query parameter. Value is
+// meaningful only when OK is true.
 type Param struct {
 	OK    bool
 	Value int64
 }
 
-// Result is a Request's validation outcome. It carries no HTTP status;
-// callers decide what to do with a failed field.
+// A Result is the outcome of validating a request.
 type Result struct {
 	HostOK bool
 	A      Param
 	B      Param
 }
 
-// OK reports whether every checked field passed.
+// OK reports whether the request passed every check.
 func (r Result) OK() bool {
 	return r.HostOK && r.A.OK && r.B.OK
 }
 
-// Validate checks req.Headers for a Host header (presence only - an empty
-// value still counts as present; only a *missing* Host is a failure) and
-// validates "a"/"b" as described by validateParam.
+// Validate checks that req has a Host header (any value, including empty)
+// and that its "a" and "b" query parameters are integers. If a parameter is
+// repeated, the first value is used.
 func Validate(req httpmsg.Request) Result {
 	_, hostOK := req.Headers.Get("Host")
 	return Result{
@@ -43,21 +39,9 @@ func Validate(req httpmsg.Request) Result {
 	}
 }
 
-// validateParam accepts a value only if it parses in its entirety as a
-// base-10 signed 64-bit integer.
-//
-// Query.Get returns "" both when a parameter was never sent and when it was
-// sent empty ("a=" and bare "a" parse identically); this subset treats both
-// the same way, so no separate check is needed. For duplicates, Query.Get
-// already returns the first value, so that policy is inherited
-// automatically rather than re-implemented here.
-//
-// strconv.ParseInt rejects non-numeric text, decimals, and any value
-// outside the int64 range (parsing overflow) uniformly as one syntax
-// error - this subset draws no distinction between these failure shapes,
-// only between "usable" and "not usable". Arithmetic overflow (e.g. a+b
-// overflowing int64) is a different concern and belongs to calculator
-// execution, not here.
+// validateParam accepts only a non-empty base-10 integer that fits in an
+// int64. A missing parameter arrives here as an empty string and is rejected
+// with the other invalid values.
 func validateParam(raw string) Param {
 	if raw == "" {
 		return Param{}

@@ -13,15 +13,14 @@ import (
 	"calcserver/internal/reqframe"
 )
 
-// startCalcServer runs the same accept-loop/serveConn logic main() uses,
-// on a real ephemeral TCP port, so tests exercise the actual orchestration.
+// startCalcServer starts the server on a free local port and returns its
+// listener, which is closed when the test ends.
 func startCalcServer(t *testing.T) net.Listener {
 	return startCalcServerWithTimeouts(t, defaultIdleTimeout, defaultReadTimeout)
 }
 
-// startCalcServerWithTimeouts is startCalcServer with injectable idle/read
-// timeouts, so timeout behavior can be tested in milliseconds instead of
-// waiting on the production defaults.
+// startCalcServerWithTimeouts is startCalcServer with custom timeouts, so
+// timeout behavior can be tested quickly.
 func startCalcServerWithTimeouts(t *testing.T, idleTimeout, readTimeout time.Duration) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -43,10 +42,8 @@ func startCalcServerWithTimeouts(t *testing.T, idleTimeout, readTimeout time.Dur
 	return ln
 }
 
-// expectClosed reads one byte with a bounded deadline and fails the test if
-// the read succeeds - used to assert the server closed its side of the
-// connection (EOF or a reset both count) without hanging the test if it
-// didn't.
+// expectClosed fails the test unless the server closes the connection
+// within two seconds.
 func expectClosed(t *testing.T, conn net.Conn) {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -66,9 +63,8 @@ func dial(t *testing.T, ln net.Listener) net.Conn {
 	return conn
 }
 
-// expectedBytes builds the exact wire bytes httpmsg itself would produce
-// for status/body, so these orchestration tests compare against the real
-// response contract without re-deriving CRLF/Content-Length rules by hand.
+// expectedBytes returns the bytes httpmsg produces for a keep-alive response
+// with the given status and body.
 func expectedBytes(t *testing.T, status httpmsg.Status, body string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -78,8 +74,8 @@ func expectedBytes(t *testing.T, status httpmsg.Status, body string) []byte {
 	return buf.Bytes()
 }
 
-// readExactly reads exactly len(want) bytes (a bounded deadline guards
-// against a hang if the server sends the wrong amount) and compares them.
+// readExactly reads len(want) bytes from conn and fails the test if they
+// differ from want.
 func readExactly(t *testing.T, conn net.Conn, want []byte) {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -105,10 +101,8 @@ func TestServeConn_SingleRequestThenConnectionStillUsable(t *testing.T) {
 	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "2"))
 }
 
-// Multiple sequential requests on the same connection, each written and
-// read in strict order - this doubles as the "different operations get
-// correct responses" proof and the "connection persists across requests"
-// proof; they are the same underlying mechanism.
+// Several requests for different operations on one connection, each sent
+// only after the previous response has been read.
 func TestServeConn_SequentialRequestsOnSameConnection(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -192,13 +186,9 @@ func TestServeConn_UnparseableRequestGetsBadRequestNotACrash(t *testing.T) {
 	readExactly(t, conn, expectedBytes(t, httpmsg.StatusOK, "2"))
 }
 
-// An incomplete request that never finds a boundary and exceeds
-// reqframe.MaxRequestSize gets a best-effort 400 Bad Request - unlike an
-// ordinary malformed-but-complete request, this is not recoverable - and
-// the connection then closes. The listener must remain able to accept a
-// fresh, independent connection afterward. The 400 response is read and
-// parsed independently from the raw socket bytes (readWireResponse),
-// not manufactured via httpmsg.NewResponse.
+// An incomplete request larger than reqframe.MaxRequestSize gets a 400
+// response with "Connection: close", after which the server closes the
+// connection. The server must keep accepting new connections.
 func TestServeConn_OversizedIncompleteRequestGetsBadRequestThenCloses(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -216,8 +206,8 @@ func TestServeConn_OversizedIncompleteRequestGetsBadRequestThenCloses(t *testing
 	if len(resp.body) != resp.contentLength {
 		t.Fatalf("len(body) = %d, Content-Length = %d", len(resp.body), resp.contentLength)
 	}
-	// Unlike an ordinary malformed-but-complete request, this connection
-	// cannot be reused - the response honestly says so.
+	// Unlike an ordinary malformed request, this connection cannot be
+	// reused, so the response says "close".
 	if got := resp.headers["Connection"]; got != "close" {
 		t.Fatalf("Connection = %q, want close", got)
 	}
@@ -246,12 +236,9 @@ func TestServeConn_IncompleteRequestThenEOFTerminatesCleanly(t *testing.T) {
 	expectClosed(t, conn)
 }
 
-// A connection that sends an incomplete request and then stops entirely
-// (no EOF, no more bytes) must eventually be closed by the server's read
-// timeout, not held open forever.
-// A request that starts arriving and then stalls must be closed by the
-// (short) read timeout - the idle timeout is set deliberately huge here so
-// only the read timeout could be what closes it.
+// A request that starts arriving and then stalls must be closed by the read
+// timeout. The idle timeout is set very long so that only the read timeout
+// can close the connection.
 func TestServeConn_ReadTimeoutClosesConnectionMidRequest(t *testing.T) {
 	const testReadTimeout = 100 * time.Millisecond
 	ln := startCalcServerWithTimeouts(t, time.Hour, testReadTimeout)
@@ -261,10 +248,9 @@ func TestServeConn_ReadTimeoutClosesConnectionMidRequest(t *testing.T) {
 	expectClosed(t, conn)
 }
 
-// A connection that sends nothing at all - no request has started, so
-// framer.Pending() is 0 - must be closed by the idle timeout instead, on
-// its own separate, shorter deadline. The read timeout is set deliberately
-// huge here so only the idle timeout could be what closes it.
+// A connection that sends nothing must be closed by the idle timeout. The
+// read timeout is set very long so that only the idle timeout can close the
+// connection.
 func TestServeConn_IdleTimeoutClosesConnectionBeforeAnyRequestStarts(t *testing.T) {
 	const testIdleTimeout = 100 * time.Millisecond
 	ln := startCalcServerWithTimeouts(t, testIdleTimeout, time.Hour)
@@ -273,12 +259,11 @@ func TestServeConn_IdleTimeoutClosesConnectionBeforeAnyRequestStarts(t *testing.
 	expectClosed(t, conn)
 }
 
-// --- End-to-end acceptance test ---
+// --- End-to-end tests ---
 //
-// wireResponse and readWireResponse deliberately do NOT reuse httpmsg's
-// writer/parser: they exist to independently verify what the server
-// actually put on the real TCP wire, not to re-check the writer's own
-// internal correctness (httpmsg's own tests already cover that).
+// wireResponse and readWireResponse parse responses from the raw bytes on the
+// socket without using httpmsg, so these tests check what the server actually
+// sent.
 
 type wireResponse struct {
 	version       string
@@ -297,11 +282,10 @@ func writeRequest(t *testing.T, conn net.Conn, req string) {
 	}
 }
 
-// readWireResponse reads one complete response from conn: it reads until
-// "\r\n\r\n" is seen (never assuming one Read call delivers the whole
-// response), parses the status line and headers, reads exactly
-// Content-Length more body bytes, and fails the test if the bytes actually
-// read don't match Content-Length exactly.
+// readWireResponse reads one response from conn. It reads until the blank
+// line ending the headers, parses the status line and headers, then reads
+// Content-Length body bytes. It fails the test if the number of body bytes
+// received differs from Content-Length.
 func readWireResponse(t *testing.T, conn net.Conn) wireResponse {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -376,9 +360,8 @@ func readWireResponse(t *testing.T, conn net.Conn) wireResponse {
 	}
 }
 
-// assertProperCRLF fails the test if raw contains a bare '\n' not preceded
-// by '\r' anywhere - proving the server's actual wire bytes use CRLF, not
-// merely LF, framing.
+// assertProperCRLF fails the test unless raw ends with a blank line and every
+// '\n' in it is preceded by '\r'.
 func assertProperCRLF(t *testing.T, raw []byte) {
 	t.Helper()
 	if !bytes.HasSuffix(raw, []byte("\r\n\r\n")) {
@@ -416,13 +399,10 @@ func assertResponse(t *testing.T, resp wireResponse, wantCode int, wantReason, w
 	}
 }
 
-// TestServer_EndToEndPersistentConnection is the canonical proof of the
-// assignment's central requirement: "build a calculator that stays on the
-// line." One real TCP connection carries seven strictly-sequenced
-// request/response round trips - four successes, an application error
-// (400), an unknown route (404), and a final success - proving the
-// connection survives both kinds of error and is still the same live
-// connection throughout.
+// TestServer_EndToEndPersistentConnection sends seven requests over a single
+// TCP connection, reading each response before sending the next: four
+// successful calculations, a 400, a 404, and a final successful calculation.
+// It shows that the connection stays open after both error responses.
 func TestServer_EndToEndPersistentConnection(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -448,27 +428,23 @@ func TestServer_EndToEndPersistentConnection(t *testing.T) {
 	resp = readWireResponse(t, conn)
 	assertResponse(t, resp, 200, "OK", "2")
 
-	// 5. application-level error on a completely well-framed request: 400,
-	// connection must stay open.
+	// 5. non-numeric parameter: 400
 	writeRequest(t, conn, "GET /add?a=10&b=not-a-number HTTP/1.1\r\nHost: localhost\r\n\r\n")
 	resp = readWireResponse(t, conn)
 	assertResponse(t, resp, 400, "Bad Request", "Bad Request")
 
-	// 6. unknown route: 404, connection must still stay open.
+	// 6. unknown path: 404
 	writeRequest(t, conn, "GET /does-not-exist?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
 	resp = readWireResponse(t, conn)
 	assertResponse(t, resp, 404, "Not Found", "Not Found")
 
-	// 7. liveness proof: a further valid request succeeds on this exact
-	// same TCP connection after two consecutive error responses.
+	// 7. a valid request still works after the two errors
 	writeRequest(t, conn, "GET /add?a=100&b=23 HTTP/1.1\r\nHost: localhost\r\n\r\n")
 	resp = readWireResponse(t, conn)
 	assertResponse(t, resp, 200, "OK", "123")
 }
 
-// 405 has no existing real-TCP coverage (only router-level unit tests), so
-// this small dedicated test adds it without lengthening the primary
-// seven-request sequence above.
+// A known path requested with a method other than GET gets a 405.
 func TestServer_MethodNotAllowedOverRealConnection(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -478,15 +454,9 @@ func TestServer_MethodNotAllowedOverRealConnection(t *testing.T) {
 	assertResponse(t, resp, 405, "Method Not Allowed", "Method Not Allowed")
 }
 
-// --- Real TCP fragmentation tests ---
-//
-// TestServeConn_MultipleRequestsBufferedInOneWrite (above) already proves
-// "two complete requests in one client Write produce two responses" - not
-// duplicated here.
+// --- Fragmented requests ---
 
-// A single request delivered across four separate, test-controlled writes
-// (not one large Write left to the OS to fragment) must still produce
-// exactly one correct response.
+// One request sent in four separate writes gets exactly one correct response.
 func TestServer_FragmentedRequestOverRealTCP(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -500,9 +470,8 @@ func TestServer_FragmentedRequestOverRealTCP(t *testing.T) {
 	assertResponse(t, resp, 200, "OK", "15")
 }
 
-// Splitting a request immediately before its final terminating byte must
-// not produce a premature response (proven with a short deadline, not a
-// sleep) and must produce the correct response once that byte arrives.
+// A request missing only its final byte gets no response until that byte
+// arrives.
 func TestServer_SplitTerminatorOverRealTCP(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -521,10 +490,8 @@ func TestServer_SplitTerminatorOverRealTCP(t *testing.T) {
 	assertResponse(t, resp, 200, "OK", "15")
 }
 
-// Two requests whose combined byte stream is split at points deliberately
-// crossing the boundary between them (not aligned to either request's
-// start or end) must each still produce the correct response, on the same
-// connection.
+// Two requests sent in three writes whose boundaries do not line up with the
+// requests each get the correct response.
 func TestServer_MultipleRequestsCrossBoundaryFragmentsOverRealTCP(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -545,10 +512,8 @@ func TestServer_MultipleRequestsCrossBoundaryFragmentsOverRealTCP(t *testing.T) 
 
 // --- Connection: close ---
 
-// A client that sends its own Connection: close header gets a response
-// that reflects it (not the usual keep-alive every other test in this
-// file expects), and the server then closes the connection instead of
-// waiting for another request.
+// A request with "Connection: close" gets a response saying "close", and the
+// server then closes the connection.
 func TestServer_ClientRequestedCloseIsHonored(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)
@@ -572,8 +537,7 @@ func TestServer_ClientRequestedCloseIsHonored(t *testing.T) {
 	expectClosed(t, conn)
 }
 
-// Without a Connection: close request header, the connection must stay
-// open exactly as before - this feature must not change default behavior.
+// Without "Connection: close", the connection stays open.
 func TestServer_NoConnectionCloseHeaderStaysOpen(t *testing.T) {
 	ln := startCalcServer(t)
 	conn := dial(t, ln)

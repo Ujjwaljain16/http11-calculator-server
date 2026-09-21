@@ -6,10 +6,9 @@ import (
 	"strconv"
 )
 
-// WriteResponse serializes resp to w: status line, headers, a blank line,
-// then the body - CRLF everywhere. It only serializes what resp already
-// contains; it never opens a socket, and never decides what status or body
-// a request deserves.
+// WriteResponse writes resp to w as a status line, headers, a blank line and
+// the body, with every line ending in CRLF. The whole response is written
+// with a single call to w.Write.
 func WriteResponse(w io.Writer, resp Response) error {
 	var buf bytes.Buffer
 

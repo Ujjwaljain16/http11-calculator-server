@@ -1,6 +1,5 @@
-// Package calc implements the four arithmetic operations, with no
-// knowledge of HTTP (methods, paths, headers, query parameters, status
-// codes, or sockets) - just integers in, an integer or an error out.
+// Package calc implements integer arithmetic that reports overflow and
+// division by zero as errors.
 package calc
 
 import (
@@ -25,23 +24,17 @@ func Mul(a, b int64) (int64, error) {
 	return checked(new(big.Int).Mul(big.NewInt(a), big.NewInt(b)))
 }
 
+// Div returns a / b truncated toward zero.
 func Div(a, b int64) (int64, error) {
 	if b == 0 {
 		return 0, ErrDivideByZero
 	}
-	// Quo truncates toward zero, matching Go's native / operator - the one
-	// case that can still overflow (math.MinInt64 / -1) is caught by
-	// checked, the same as for the other three operations.
 	return checked(new(big.Int).Quo(big.NewInt(a), big.NewInt(b)))
 }
 
-// checked computes every operation at arbitrary precision via math/big -
-// which cannot itself overflow - then uses big.Int's own IsInt64 to decide
-// whether the true mathematical result fits back into int64. This single
-// check replaces hand-rolled overflow arithmetic for +, -, and *, and
-// correctly covers the one edge case ad hoc checks tend to miss
-// (math.MinInt64 * -1 or math.MinInt64 / -1, which silently wrap under
-// Go's own two's-complement int64 rules but do not fit in int64).
+// checked converts an exact result back to int64, or returns ErrOverflow if
+// it does not fit. Computing with big.Int first avoids wrap-around in every
+// case, including math.MinInt64 * -1 and math.MinInt64 / -1.
 func checked(result *big.Int) (int64, error) {
 	if !result.IsInt64() {
 		return 0, ErrOverflow

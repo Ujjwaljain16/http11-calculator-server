@@ -1,7 +1,7 @@
-// Package main wires the calculator server together: one persistent
-// reqframe.Framer per TCP connection, feeding httpmsg/validate/router to
-// process every request the framer can extract, writing one response per
-// request, and returning to the same connection for the next request.
+// Command server is a calculator server built directly on TCP sockets. Each
+// accepted connection gets one persistent reqframe.Framer; every complete
+// request it yields is parsed, validated, routed and answered on the same
+// connection, which stays open for further requests.
 package main
 
 import (
@@ -22,33 +22,24 @@ import (
 	"calcserver/internal/validate"
 )
 
-// fallbackVersion is used only when a request couldn't be parsed at all,
-// so its own HTTP-version token isn't available to echo back.
+// fallbackVersion is the HTTP version used in responses to requests that
+// could not be parsed, since no version is available to echo back.
 const fallbackVersion = "HTTP/1.1"
 
-// readChunkSize is how many bytes serveConn reads from the socket at a
-// time; unrelated to reqframe.MaxRequestSize, which bounds accumulated
-// request bytes, not a single read's size.
+// readChunkSize is the size of the buffer used for each socket read.
 const readChunkSize = 4096
 
-// defaultReadTimeout bounds how long a read may wait once a request has
-// already started arriving (the framer holds some bytes but not yet a full
-// request). It is deliberately short: a client that started sending
-// something and then stalls is more suspicious than one that simply
-// hasn't sent its next request yet.
+// defaultReadTimeout is how long a read may wait once a request has started
+// arriving but is not yet complete.
 const defaultReadTimeout = 5 * time.Second
 
-// defaultIdleTimeout bounds how long a read may wait when nothing has
-// arrived since the last request completed (the framer is empty) - i.e.
-// how long a persistent connection is kept open waiting for a new request
-// to even begin. It is more generous than defaultReadTimeout: a client
-// legitimately reusing a keep-alive connection may pause between requests
-// longer than it should ever stall mid-request. Both are refreshed before
-// every read, so an active exchange of many requests never trips either.
+// defaultIdleTimeout is how long a read may wait for a new request to begin
+// on a connection with nothing buffered. It is longer than
+// defaultReadTimeout because a client may pause between requests.
 const defaultIdleTimeout = 60 * time.Second
 
 func main() {
-	addr := flag.String("addr", ":0", "TCP address to listen on (host:port); :0 picks an ephemeral free port")
+	addr := flag.String("addr", ":0", "TCP address to listen on (host:port); :0 picks a free port")
 	flag.Parse()
 
 	ln, err := net.Listen("tcp", *addr)
@@ -59,11 +50,9 @@ func main() {
 
 	fmt.Printf("listening on %s\n", ln.Addr())
 
-	// On SIGINT/SIGTERM, close the listener so Accept() returns
-	// net.ErrClosed and the loop below exits on its own - the same clean
-	// shutdown path already used whenever a test closes its listener.
-	// In-flight connections are not drained; each is left to finish (or
-	// end) on its own goroutine when the process exits.
+	// On SIGINT or SIGTERM, close the listener so that Accept returns
+	// net.ErrClosed and the loop below ends. Connections already being
+	// served are not drained.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -74,10 +63,8 @@ func main() {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			// A closed listener means there is nothing left to accept and
-			// never will be again - keep looping would just spin logging
-			// the same error forever. Any other Accept error is treated as
-			// transient: log it and keep serving other clients.
+			// A closed listener cannot accept again, so stop. Any other
+			// error is treated as temporary.
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
@@ -88,19 +75,16 @@ func main() {
 	}
 }
 
-// serveConn owns conn for its entire lifetime: one Framer is created here
-// and reused across every request on this connection. It drains every
-// fully-buffered request before reading more bytes, so a read only ever
-// happens when the framer has nothing left to give it.
+// serveConn serves conn until it is closed, using the default timeouts.
 func serveConn(conn net.Conn) {
 	serveConnWithTimeout(conn, defaultIdleTimeout, defaultReadTimeout)
 }
 
-// serveConnWithTimeout is serveConn with injectable idle/read timeouts, so
-// tests can exercise timeout behavior in milliseconds instead of waiting on
-// the production defaults. Before each read, it picks whichever timeout
-// applies: idleTimeout if the framer is currently empty (waiting for a new
-// request to start), readTimeout if a request is already partway in.
+// serveConnWithTimeout serves conn until it ends. One Framer is created for
+// the connection and reused for every request on it. Requests already
+// buffered are all handled before the next socket read. Before each read the
+// deadline is set to idleTimeout if the framer holds no bytes, or to
+// readTimeout if a request is partly received.
 func serveConnWithTimeout(conn net.Conn, idleTimeout, readTimeout time.Duration) {
 	defer conn.Close()
 
@@ -123,32 +107,25 @@ func serveConnWithTimeout(conn net.Conn, idleTimeout, readTimeout time.Duration)
 			framer.Feed(readBuf[:n])
 		}
 		if err != nil {
-			// A final chunk may have just completed a request; process it
-			// before giving up the connection on EOF, a timeout, or a read
-			// error - all three are connection-level failures from here on.
+			// EOF, timeout or read error. The last chunk read may have
+			// completed a request, so handle it before returning.
 			drainBufferedRequests(conn, framer)
 			return
 		}
 	}
 }
 
-// drainBufferedRequests processes every complete request already sitting
-// in framer, without touching the socket for reads. It returns false if
-// the connection is no longer usable: a response failed to write, or the
-// framer reported a fatal framing error (its buffered, still-incomplete
-// request grew past reqframe.MaxRequestSize).
+// drainBufferedRequests handles every complete request currently in framer
+// without reading from the socket. It reports whether the connection can
+// still be used.
 //
-// A fatal framing error is not an ordinary malformed-request 400: there is
-// no safely identified request boundary, so the connection can never be
-// reused afterward. As a courtesy, one best-effort 400 is still attempted
-// before closing - whether or not that write succeeds, the connection is
-// never read from again.
+// If the framer reports ErrRequestTooLarge, no request boundary can be
+// located, so the rest of the stream cannot be interpreted. A 400 response
+// is attempted and the connection is then closed.
 func drainBufferedRequests(conn net.Conn, framer *reqframe.Framer) bool {
 	for {
 		raw, ok, err := framer.Next()
 		if err != nil {
-			// The connection is closing regardless of whether this write
-			// succeeds, so the response honestly says so too.
 			resp := httpmsg.NewCloseResponse(fallbackVersion, httpmsg.StatusBadRequest, httpmsg.StatusBadRequest.ReasonPhrase())
 			_ = writeResponse(conn, resp)
 			return false
@@ -162,12 +139,9 @@ func drainBufferedRequests(conn net.Conn, framer *reqframe.Framer) bool {
 	}
 }
 
-// handleRequest runs one framed request through parsing, validation,
-// routing, and response construction, then writes the response. It
-// returns false when writing the response itself fails (a connection-level
-// failure), or when the request itself asked to close the connection via
-// its own Connection: close header - in which case the write may have
-// succeeded, but the caller must still stop serving this connection.
+// handleRequest parses, validates, routes and answers one framed request. It
+// reports whether the connection can still be used: false if the response
+// could not be written or the client sent "Connection: close".
 func handleRequest(conn net.Conn, raw []byte) bool {
 	req, err := httpmsg.ParseRequest(raw)
 	if err != nil {
@@ -186,8 +160,7 @@ func handleRequest(conn net.Conn, raw []byte) bool {
 	return !closeRequested
 }
 
-// clientRequestedClose reports whether req's own Connection header asked
-// for the connection to be closed after this response.
+// clientRequestedClose reports whether req has a "Connection: close" header.
 func clientRequestedClose(req httpmsg.Request) bool {
 	value, ok := req.Headers.Get("Connection")
 	return ok && strings.EqualFold(value, "close")

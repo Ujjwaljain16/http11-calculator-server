@@ -1,6 +1,6 @@
 package httpmsg
 
-// Status is one of the four HTTP status codes this server ever returns.
+// Status is an HTTP status code. Only the codes this server sends are defined.
 type Status int
 
 const (
@@ -10,9 +10,8 @@ const (
 	StatusMethodNotAllowed Status = 405
 )
 
-// ReasonPhrase is the one source of truth for each status's reason text -
-// used in the status line, and, for non-2xx responses, as the body itself
-// (a short reason string, e.g. "Bad Request").
+// ReasonPhrase returns the standard reason phrase for s. It is used in the
+// status line and as the body of error responses.
 func (s Status) ReasonPhrase() string {
 	switch s {
 	case StatusOK:

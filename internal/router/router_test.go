@@ -8,8 +8,7 @@ import (
 	"calcserver/internal/validate"
 )
 
-// route parses raw (reusing the already-tested parser and validator as
-// fixtures, not re-testing them) and runs it through Router.
+// route parses and validates raw, then routes it.
 func route(t *testing.T, raw string) router.Decision {
 	t.Helper()
 	req, err := httpmsg.ParseRequest([]byte(raw))
@@ -72,9 +71,8 @@ func TestRoute_KnownPathWrongMethodIsMethodNotAllowed(t *testing.T) {
 	}
 }
 
-// A wrong method must never be reported as NotFound, and an unknown path
-// must never be reported as MethodNotAllowed - the two failure modes are
-// tested together here so the distinction itself is what's verified.
+// An unknown path is NotFound and a known path with a wrong method is
+// MethodNotAllowed; the two are not confused.
 func TestRoute_UnknownPathAndWrongMethodAreDistinct(t *testing.T) {
 	unknownPath := route(t, "GET /pow?a=2&b=8 HTTP/1.1\r\nHost: x\r\n\r\n")
 	if unknownPath.Outcome != router.OutcomeNotFound {

@@ -7,52 +7,33 @@ import (
 	"strings"
 )
 
-// ErrMalformedRequest wraps every syntax-level parse failure. Callers can
-// check for it with errors.Is; the wrapped message gives the specific
-// reason. Parsing never reports on application-level concerns (unknown
-// operation, invalid number, missing Host, ...) - only on request syntax
-// this subset's grammar cannot represent at all.
+// ErrMalformedRequest is wrapped by every error ParseRequest returns for
+// syntactically invalid input. Semantic problems such as an unknown path, a
+// non-numeric parameter or a missing Host header are not parse errors.
 var ErrMalformedRequest = errors.New("malformed request")
 
-// ParseRequest turns one framed request block - the exact bytes returned by
-// reqframe.Framer.Next(), i.e. ending in "\r\n\r\n" - into a Request.
+// ParseRequest parses one request as returned by reqframe.Framer.Next: a
+// request line, header lines, and a terminating blank line, all ending in
+// CRLF.
 //
-// Documented parsing decisions:
+// Parsing rules:
 //
-//   - Duplicate headers: every occurrence is kept, in order (Headers is a
-//     slice, not a map). Whether a duplicate is acceptable is validation's
-//     decision, not parsing's.
-//   - Duplicate query parameters: every value is kept, in order
-//     (Query is net/url.Values, i.e. map[string][]string).
-//   - Empty query values ("a=") and bare parameter names without '='
-//     ("a") both produce an entry with value "" - both mean "present,
-//     empty", per net/url.ParseQuery's own behavior.
-//   - Percent-encoding: the path is decoded with url.PathUnescape; the
-//     query string is decoded with url.ParseQuery, which follows
-//     application/x-www-form-urlencoded rules (a literal '+' decodes to
-//     space; use %2B for a literal plus). Invalid percent-encoding
-//     anywhere in the target makes the whole request malformed - there is
-//     no partial recovery.
-//   - Malformed request lines: the line must be exactly three fields
-//     separated by a single space (METHOD, TARGET, VERSION); any other
-//     count of fields is malformed. The method is not restricted to known
-//     verbs here - an unsupported method (e.g. POST) still parses; only
-//     routing rejects it.
-//   - The request-target must be in origin-form, starting with '/' - no
-//     absolute-URI, "*", or authority form is supported.
-//   - Malformed header lines: a header line must contain a colon, with a
-//     non-empty name and no whitespace between the name and the colon
-//     (whitespace there is a known request-smuggling ambiguity, so it is
-//     rejected rather than tolerated). The value has leading/trailing
-//     whitespace trimmed but may be empty.
-//   - CRLF handling: request-line and header-line text must not contain a
-//     bare '\r' or '\n' left over after splitting on "\r\n" - such a
-//     leftover means the client used an inconsistent line ending, which
-//     is treated as malformed rather than silently accepted.
-//   - HTTP version: only the syntactic shape "HTTP/<digits>.<digits>" is
-//     checked (case-sensitive "HTTP/", per RFC 7230's fixed HTTP-name).
-//     The specific version number is not rejected or special-cased - this
-//     subset defines no version-dependent behavior.
+//   - The request line has exactly three fields separated by single spaces:
+//     method, target and version. Any method is accepted; the router decides
+//     whether it is supported.
+//   - The version must have the form HTTP/<digits>.<digits>. The number
+//     itself is not checked.
+//   - The target must start with '/'. Its path is percent-decoded with
+//     url.PathUnescape and its query string parsed with url.ParseQuery, so
+//     '+' in a query decodes to a space. Invalid percent-encoding makes the
+//     request malformed.
+//   - Query parameters and headers keep every occurrence, in order.
+//     Empty values ("a=") and bare names ("a") both give an empty value.
+//   - A header line needs a colon, a non-empty name, and no whitespace
+//     between the name and the colon. Leading and trailing whitespace is
+//     trimmed from the value, which may be empty.
+//   - A bare CR or LF inside the request line or a header line makes the
+//     request malformed.
 func ParseRequest(raw []byte) (Request, error) {
 	s := string(raw)
 

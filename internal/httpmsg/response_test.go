@@ -7,8 +7,7 @@ import (
 	"calcserver/internal/httpmsg"
 )
 
-// Content-Length must equal the response body's exact byte count, computed
-// from the body's own bytes - never an assumed character count.
+// Content-Length equals the body's length in bytes.
 func TestNewResponse_ContentLengthMatchesActualBodyBytes(t *testing.T) {
 	cases := map[string]string{
 		"empty_body":      "",

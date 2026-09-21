@@ -1,7 +1,6 @@
-// Package reqframe isolates complete HTTP-style request blocks from a raw,
-// possibly-fragmented byte stream. It knows only where one request ends and
-// the next begins ("\r\n\r\n") - it does not parse method, headers, or any
-// other request content.
+// Package reqframe finds request boundaries in a TCP byte stream. A request
+// ends at the first "\r\n\r\n" after its start; the package does not
+// interpret the request's contents.
 package reqframe
 
 import (
@@ -11,73 +10,56 @@ import (
 
 const terminator = "\r\n\r\n"
 
-// MaxRequestSize bounds how many bytes a Framer will accumulate while
-// looking for a request boundary that hasn't arrived yet. This subset's
-// requests are a one-line GET plus a Host header and maybe one or two
-// extras - well under 200 bytes in practice. 8 KiB gives roughly 40x
-// headroom over any realistic legitimate request while still bounding how
-// much memory an untrusted peer can make a connection hold onto by simply
-// never finishing a header block.
+// MaxRequestSize is the largest number of bytes a Framer will hold while
+// still waiting for a request boundary. Requests in this server are well
+// under 200 bytes, so 8 KiB is generous while still bounding the memory a
+// client can consume by never finishing a request.
 const MaxRequestSize = 8 * 1024
 
-// ErrRequestTooLarge is returned by Next when the buffered, still-incomplete
-// request has exceeded MaxRequestSize without a request boundary ever being
-// found. There is no safely identified request boundary in this case, so
-// the caller cannot recover a request from the buffer - it can only give up
-// on the connection.
-var ErrRequestTooLarge = errors.New("reqframe: buffered request exceeds maximum size before a boundary was found")
+// ErrRequestTooLarge is returned by Next when more than MaxRequestSize bytes
+// have accumulated without a request boundary. Since no boundary was found,
+// the remaining stream cannot be split into requests and the caller should
+// close the connection.
+var ErrRequestTooLarge = errors.New("reqframe: no request boundary within maximum request size")
 
-// Framer holds a persistent per-connection byte buffer and extracts
-// complete requests terminated by "\r\n\r\n" from it.
-//
-// A single Framer is owned by one connection for that connection's entire
-// lifetime; it is not safe for concurrent use.
+// A Framer accumulates the bytes read from one connection and extracts
+// complete requests from them. It keeps unconsumed bytes between calls, so a
+// request may arrive split across reads and several requests may arrive in
+// one read. A Framer belongs to a single connection and is not safe for
+// concurrent use.
 type Framer struct {
 	buf []byte
-	// scanned is the length buf had the last time it was searched for the
-	// terminator and none was found. The next search resumes from
-	// max(0, scanned-3) instead of from the start, since a terminator can
-	// never begin more than 3 bytes before the point already ruled out.
+	// scanned is the length of buf at the last search that found no
+	// terminator. The next search starts at scanned-3, because a terminator
+	// split across two reads can begin at most 3 bytes before that point.
 	scanned int
 }
 
-// NewFramer returns an empty Framer ready to accept bytes.
+// NewFramer returns an empty Framer.
 func NewFramer() *Framer {
 	return &Framer{}
 }
 
-// Pending reports how many bytes are currently buffered with no complete
-// request extracted from them yet. Callers can use this to distinguish an
-// idle connection (0 - nothing has arrived since the last request) from
-// one with a request already partway in (non-zero), without reaching into
-// the Framer's internal buffer.
+// Pending returns the number of buffered bytes not yet returned as part of a
+// request. It is zero when no partial request is held.
 func (f *Framer) Pending() int {
 	return len(f.buf)
 }
 
-// Feed appends newly read bytes to the framer's persistent buffer. It does
-// no scanning itself; call Next to check for a complete request.
+// Feed appends data read from the connection to the buffer.
 func (f *Framer) Feed(data []byte) {
 	f.buf = append(f.buf, data...)
 }
 
-// Next attempts to extract exactly one complete request already present in
-// the buffer, performing no I/O of its own.
+// Next extracts the next complete request from the buffer, without reading
+// from the connection.
 //
-//   - Complete request found: returns (bytes, true, nil). The bytes run from
-//     the start of the buffer through and including the terminator; any
-//     bytes after it are retained internally for the next call.
-//   - Nothing complete yet: returns (nil, false, nil). All buffered bytes
-//     are kept for a later Feed.
-//   - Fatal framing error: returns (nil, false, ErrRequestTooLarge) once the
-//     incomplete buffered request exceeds MaxRequestSize. The buffer is left
-//     as-is (it is not grown further by Next itself); the caller must treat
-//     this as unrecoverable and close the connection, since no request
-//     boundary can safely be identified.
+// If the buffer contains a terminator, Next returns the bytes up to and
+// including the first one and true; any later bytes stay buffered. If it
+// does not, Next returns nil and false. If more than MaxRequestSize bytes are
+// buffered with no terminator, it returns ErrRequestTooLarge.
 //
-// The returned slice on success is a copy: mutating the framer afterwards
-// (via further Feed/Next calls) can never affect bytes already handed to a
-// caller.
+// The returned slice is a copy and is not affected by later calls.
 func (f *Framer) Next() ([]byte, bool, error) {
 	start := f.scanned - (len(terminator) - 1)
 	if start < 0 {

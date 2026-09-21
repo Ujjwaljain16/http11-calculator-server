@@ -7,11 +7,8 @@ import (
 	"calcserver/internal/httpmsg"
 )
 
-// TestWriteResponse_ByteExact constructs a known Response for each of the
-// four statuses this server returns and compares the complete serialized
-// byte sequence against the expected wire representation, with "\r\n"
-// written explicitly so a stray "\n" cannot hide in a normalized string
-// comparison.
+// TestWriteResponse_ByteExact compares the complete bytes written for each
+// status against the expected text, with "\r\n" spelled out.
 func TestWriteResponse_ByteExact(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -86,9 +83,7 @@ func TestWriteResponse_ByteExact(t *testing.T) {
 	}
 }
 
-// assertNoLoneLineFeed fails if any '\n' byte appears without an
-// immediately preceding '\r' - catching accidental bare-LF output that a
-// normalized string comparison could miss.
+// assertNoLoneLineFeed fails if data contains a '\n' not preceded by '\r'.
 func assertNoLoneLineFeed(t *testing.T, data []byte) {
 	t.Helper()
 	for i, b := range data {
@@ -98,8 +93,8 @@ func assertNoLoneLineFeed(t *testing.T, data []byte) {
 	}
 }
 
-// assertEndsWithBlankLineThenBody checks the response has the required
-// shape: ... \r\n\r\n <body>, with nothing else after the body.
+// assertEndsWithBlankLineThenBody checks that the bytes after the first blank
+// line are exactly body.
 func assertEndsWithBlankLineThenBody(t *testing.T, data []byte, body string) {
 	t.Helper()
 	idx := bytes.Index(data, []byte("\r\n\r\n"))

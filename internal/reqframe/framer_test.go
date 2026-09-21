@@ -10,9 +10,7 @@ import (
 	"calcserver/internal/reqframe"
 )
 
-// next is a small test helper: it fails the test on an unexpected framing
-// error, so every existing (non-size-limit) test can keep asserting only
-// on (bytes, ok) as before.
+// next calls f.Next and fails the test if it returns an error.
 func next(t *testing.T, f *reqframe.Framer) ([]byte, bool) {
 	t.Helper()
 	got, ok, err := f.Next()
@@ -251,8 +249,7 @@ func TestNext_StopsAtFirstTerminatorWhenMultiplePresent(t *testing.T) {
 	}
 }
 
-// A second request already sitting in the buffer must be retrievable
-// without any further Feed call - the core persistent-buffer requirement.
+// A second request already in the buffer is returned without another Feed.
 func TestNext_BufferedSecondRequestNeedsNoFurtherFeed(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
 	req2 := []byte("GET /sub?a=5&b=3 HTTP/1.1\r\nHost: y\r\n\r\n")
@@ -272,8 +269,7 @@ func TestNext_BufferedSecondRequestNeedsNoFurtherFeed(t *testing.T) {
 	}
 }
 
-// Ownership: an already-extracted request must never change as a result of
-// later Feed/Next activity on the same Framer.
+// A returned request is not changed by later Feed or Next calls.
 func TestNext_ExtractedRequestIsNotCorruptedByLaterFeeds(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
 
@@ -293,9 +289,8 @@ func TestNext_ExtractedRequestIsNotCorruptedByLaterFeeds(t *testing.T) {
 	}
 }
 
-// Property-style check: the same logical request, fragmented at many
-// different deterministic split points, must always extract identically.
-// Uses only math/rand with a fixed seed - no external dependency.
+// The same request split into random chunks of 1 to 5 bytes (fixed seed, so
+// repeatable) is always returned unchanged.
 func TestNext_FragmentationIsOrderIndependent(t *testing.T) {
 	req := []byte("GET /div?a=10&b=0 HTTP/1.1\r\nHost: example\r\nX-Extra: value\r\n\r\n")
 	rng := rand.New(rand.NewSource(42))
@@ -334,9 +329,7 @@ func TestNext_FragmentationIsOrderIndependent(t *testing.T) {
 
 // --- Request size limit ---
 
-// An incomplete request that grows past MaxRequestSize without ever
-// producing a boundary must report ErrRequestTooLarge, not hang forever
-// waiting for more bytes to complete a terminator that may never come.
+// More than MaxRequestSize bytes with no terminator gives ErrRequestTooLarge.
 func TestNext_OversizedIncompleteRequestIsFatal(t *testing.T) {
 	f := reqframe.NewFramer()
 	f.Feed(bytes.Repeat([]byte("x"), reqframe.MaxRequestSize+1))
@@ -350,8 +343,7 @@ func TestNext_OversizedIncompleteRequestIsFatal(t *testing.T) {
 	}
 }
 
-// A request exactly at the limit, still with no terminator, is also fatal -
-// the limit is a hard ceiling on how long the search can keep growing.
+// Exactly MaxRequestSize bytes is still allowed; one more byte is not.
 func TestNext_ExactlyAtLimitWithNoTerminatorIsFatal(t *testing.T) {
 	f := reqframe.NewFramer()
 	f.Feed(bytes.Repeat([]byte("x"), reqframe.MaxRequestSize))
@@ -364,7 +356,7 @@ func TestNext_ExactlyAtLimitWithNoTerminatorIsFatal(t *testing.T) {
 		t.Fatalf("exactly MaxRequestSize bytes with no terminator should not yet be fatal, got %v", err)
 	}
 
-	// One more byte with still no terminator tips it over.
+	// One more byte exceeds the limit.
 	f.Feed([]byte("x"))
 	_, ok, err = f.Next()
 	if ok {
@@ -375,9 +367,7 @@ func TestNext_ExactlyAtLimitWithNoTerminatorIsFatal(t *testing.T) {
 	}
 }
 
-// A legitimately large-but-under-the-limit buffer must still work: the
-// limit only fires when a boundary is never found, not merely because the
-// buffer is large.
+// A large request under the limit is returned normally.
 func TestNext_LargeButUnderLimitStillCompletes(t *testing.T) {
 	body := bytes.Repeat([]byte("x"), reqframe.MaxRequestSize-100)
 	req := append(append([]byte{}, body...), []byte("\r\n\r\n")...)
@@ -397,19 +387,9 @@ func TestNext_LargeButUnderLimitStillCompletes(t *testing.T) {
 	}
 }
 
-// --- TCP fragmentation / request-boundary tests ---
-//
-// Split-\r\n\r\n coverage (every interior position of the 4-byte
-// terminator: "\r|\n\r\n", "\r\n|\r\n", "\r\n\r|\n") is already exhaustively
-// covered by TestNext_BoundarySplitAcrossFeeds above; extracted-request
-// immutability by TestNext_ExtractedRequestIsNotCorruptedByLaterFeeds; a
-// partial third request retained behind two complete ones by
-// TestNext_MultipleRequestsPlusPartialThird; and single-request random
-// fragmentation by TestNext_FragmentationIsOrderIndependent. None of those
-// are duplicated here.
+// --- Fragmentation ---
 
-// A full request fed one byte at a time must produce no complete request
-// until the very last byte, then exactly the original bytes.
+// A request fed one byte at a time is complete only after its last byte.
 func TestFramer_OneByteAtATime(t *testing.T) {
 	req := []byte("GET /add?a=10&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
 	f := reqframe.NewFramer()
@@ -435,11 +415,8 @@ func TestFramer_OneByteAtATime(t *testing.T) {
 	}
 }
 
-// The narrowest possible terminator split (3 of 4 bytes in one Feed, the
-// final byte plus an entirely new request in the next) must still extract
-// both requests correctly. TestNext_BoundarySplitWithFollowingRequest above
-// covers a different (half-and-half) split point; this covers the specific
-// "\r\n\r | \n"+request2 pattern.
+// The first request's terminator is split so that its last byte arrives in
+// the same Feed as the whole second request.
 func TestFramer_SplitTerminatorThenNextRequest(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
 	req2 := []byte("GET /sub?a=5&b=3 HTTP/1.1\r\nHost: y\r\n\r\n")
@@ -462,18 +439,15 @@ func TestFramer_SplitTerminatorThenNextRequest(t *testing.T) {
 	}
 }
 
-// Three requests fragmented at a fixed, deterministic (non-random) sequence
-// of chunk sizes deliberately not aligned to any request's boundaries must
-// still be extracted as exactly [request1, request2, request3], with no
-// corruption, duplication, or omission.
+// Three requests fed in chunks of varying fixed sizes that do not line up
+// with request boundaries are returned exactly and in order.
 func TestFramer_MultipleRequestsAcrossArbitraryFragments(t *testing.T) {
 	req1 := []byte("GET /add?a=1&b=2 HTTP/1.1\r\nHost: x\r\n\r\n")
 	req2 := []byte("GET /sub?a=5&b=3 HTTP/1.1\r\nHost: y\r\n\r\n")
 	req3 := []byte("GET /mul?a=6&b=7 HTTP/1.1\r\nHost: z\r\n\r\n")
 	combined := append(append(append([]byte{}, req1...), req2...), req3...)
 
-	// Fixed, deterministic chunk sizes (not random, not aligned to any
-	// request's length) - chosen only to guarantee frequent, uneven cuts.
+	// Chunk sizes cycle through this list.
 	chunkSizes := []int{1, 2, 5, 3, 8, 1, 13, 4, 6, 2, 9, 1, 17, 5}
 
 	f := reqframe.NewFramer()
@@ -508,9 +482,8 @@ func TestFramer_MultipleRequestsAcrossArbitraryFragments(t *testing.T) {
 	}
 }
 
-// Pending reports 0 on a fresh Framer, grows as unterminated bytes are
-// fed, and drops back to 0 once a complete request is fully extracted
-// with nothing left over.
+// Pending is 0 for a new Framer, counts buffered bytes, and returns to 0
+// once the only buffered request has been extracted.
 func TestFramer_Pending(t *testing.T) {
 	f := reqframe.NewFramer()
 	if got := f.Pending(); got != 0 {
